@@ -165,9 +165,17 @@ public class FileInformationDialog {
                 ? preloadedMeta
                 : AppDB.get().getOrCreate(file.getPath());
 
+        // The "logical path" is the SAF URI (or Cloud path) when this is a SAF/cloud book;
+        // file.getPath() may be a symlink under our cache or a slash-normalized "content:/..." string,
+        // both of which break DB, Glide cache, and SafOpfRegistry lookups.
+        final String logicalPath = preloadedMeta != null && TxtUtils.isNotEmpty(preloadedMeta.getPath())
+                ? preloadedMeta.getPath()
+                : file.getPath();
+        final boolean isSaf = ExtUtils.isExteralSD(logicalPath);
+
         LOG.d("FileMeta-State", fileMeta.getState(), fileMeta.getTitle());
 
-        if (firstTime && TxtUtils.isEmpty(fileMeta.getTitle()) && !ExtUtils.isExteralSD(file.getPath())) {
+        if (firstTime && TxtUtils.isEmpty(fileMeta.getTitle()) && !isSaf) {
 
             new AsyncProgressResultToastTask(a, new ResultResponse<Boolean>() {
                 @Override public boolean onResultRecive(Boolean result) {
@@ -230,9 +238,9 @@ public class FileInformationDialog {
         });
 
         TextView pathView = (TextView) dialog.findViewById(R.id.path);
-        pathView.setText(file.getPath());
+        pathView.setText(logicalPath);
         if (AppsConfig.IS_LOG) {
-            pathView.setText(file.getPath() + "\n" + LOG.ojectAsString(fileMeta));
+            pathView.setText(logicalPath + "\n" + LOG.ojectAsString(fileMeta));
         }
 
         ((TextView) dialog.findViewById(R.id.date)).setText(fileMeta.getDateTxt());
@@ -257,7 +265,7 @@ public class FileInformationDialog {
             ((TextView) dialog.findViewById(R.id.size)).setText(fileMeta.getSizeTxt());
         }
 
-        File mimeFile = ExtUtils.isExteralSD(file.getPath()) ? new File(TxtUtils.nullToEmpty(fileMeta.getPathTxt())) : file;
+        File mimeFile = isSaf ? new File(TxtUtils.nullToEmpty(fileMeta.getPathTxt())) : file;
         ((TextView) dialog.findViewById(R.id.mimeType)).setText("" + ExtUtils.getMimeType(mimeFile));
 
         final TextView hypenLang = (TextView) dialog.findViewById(R.id.hypenLang);
@@ -294,7 +302,7 @@ public class FileInformationDialog {
 
         final TextView infoView = (TextView) dialog.findViewById(R.id.metaInfo);
         final TextView expand = (TextView) dialog.findViewById(R.id.expand);
-        String bookOverview = FileMetaCore.getBookOverview(file.getPath());
+        String bookOverview = isSaf ? "" : FileMetaCore.getBookOverview(file.getPath());
         infoView.setText(TxtUtils.nullToEmpty(bookOverview));
 
         infoView.post(new Runnable() {
@@ -480,7 +488,7 @@ public class FileInformationDialog {
         convertFile.setVisibility(View.GONE);
 
         View openWithView = TxtUtils.underlineTextView(dialog.findViewById(R.id.openWith));
-        if (ExtUtils.isExteralSD(file.getPath())) {
+        if (isSaf) {
             openWithView.setVisibility(View.GONE);
         } else {
             openWithView.setOnClickListener(new OnClickListener() {
@@ -495,7 +503,7 @@ public class FileInformationDialog {
         }
 
         View sendFileView = TxtUtils.underlineTextView(dialog.findViewById(R.id.sendFile));
-        if (ExtUtils.isExteralSD(file.getPath())) {
+        if (isSaf) {
             sendFileView.setVisibility(View.GONE);
         } else {
             sendFileView.setOnClickListener(new OnClickListener() {
@@ -521,7 +529,7 @@ public class FileInformationDialog {
                     infoDialog = null;
                 }
 
-                String deleteDisplayName = ExtUtils.isExteralSD(file.getPath())
+                String deleteDisplayName = isSaf
                         ? TxtUtils.nullToEmpty(fileMeta.getPathTxt())
                         : null;
                 dialogDelete(a, file, deleteDisplayName, onDeleteAction);
@@ -549,13 +557,13 @@ public class FileInformationDialog {
         final ImageView coverImage = (ImageView) dialog.findViewById(R.id.image);
         TintUtil.roundCover(coverImage);
 
-        IMG.getCoverPageWithEffect(a, file.getPath(), null)
+        IMG.getCoverPageWithEffect(a, logicalPath, null)
            .into(coverImage);
 
         coverImage.setOnClickListener(new OnClickListener() {
 
             @Override public void onClick(View v) {
-                showImage(a, file.getPath());
+                showImage(a, logicalPath);
             }
         });
 

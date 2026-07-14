@@ -143,8 +143,6 @@ public class PrefDialogs {
                 ChooserDialogFragment.chooseFolder(a, BookCSS.get().dirLastPath).setOnSelectListener(new ResultResponse2<String, Dialog>() {
                     @Override
                     public boolean onResultRecive(String nPath, Dialog dialog) {
-                        // The folder goes straight into the list the caller keeps; this dialog
-                        // is not put back up over it.
                         addSearchPath(a, nPath);
                         dialog.dismiss();
                         onChanges.run();

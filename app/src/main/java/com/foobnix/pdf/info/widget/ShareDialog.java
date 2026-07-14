@@ -238,7 +238,14 @@ public class ShareDialog {
 
     public static void show(final Activity a, final File file, final Runnable onDeleteAction, final int page,
                             final DocumentController dc, final Runnable hideShow) {
-        show(a, file, null, onDeleteAction, page, dc, hideShow);
+        FileMeta resolved = null;
+        String safUri = a != null && a.getIntent() != null
+                ? a.getIntent().getStringExtra("SAF_ORIGINAL_URI")
+                : null;
+        if (safUri != null) {
+            resolved = AppDB.get().load(safUri);
+        }
+        show(a, file, resolved, onDeleteAction, page, dc, hideShow);
     }
 
     public static void show(final Activity a, final File file, final FileMeta preloadedMeta,

@@ -3,9 +3,15 @@ package com.foobnix.work;
 import static com.foobnix.pdf.info.AppsConfig.SEARCH_FRAGMENT_WORKER_NAME;
 import static com.foobnix.pdf.info.AppsConfig.WORKER_POLICY;
 
+import android.content.ContentResolver;
 import android.content.Context;
+import android.database.Cursor;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
+import android.provider.DocumentsContract;
+import android.system.Os;
 
 import androidx.annotation.NonNull;
 import androidx.work.OneTimeWorkRequest;
@@ -14,9 +20,11 @@ import androidx.work.WorkerParameters;
 
 import com.foobnix.android.utils.JsonDB;
 import com.foobnix.android.utils.LOG;
+import com.foobnix.android.utils.StringDB;
 import com.foobnix.android.utils.TxtUtils;
 import com.foobnix.dao2.FileMeta;
 import com.foobnix.ext.CacheZipUtils;
+import com.foobnix.ext.CalirbeExtractor;
 import com.foobnix.ext.EbookMeta;
 import com.foobnix.mobi.parser.IOUtils;
 import com.foobnix.model.AppData;
@@ -29,6 +37,7 @@ import com.foobnix.pdf.info.Clouds;
 import com.foobnix.pdf.info.ExtUtils;
 import com.foobnix.pdf.info.IMG;
 import com.foobnix.pdf.info.Prefs;
+import com.foobnix.pdf.info.SafOpfRegistry;
 import com.foobnix.pdf.info.io.SearchCore;
 import com.foobnix.pdf.info.model.BookCSS;
 import com.foobnix.sys.ImageExtractor;
@@ -39,8 +48,12 @@ import org.ebookdroid.common.settings.books.SharedBooks;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 
 public class SearchAllBooksWorker extends MessageWorker {
@@ -90,6 +103,7 @@ public class SearchAllBooksWorker extends MessageWorker {
 
 
             itemsMeta.clear();
+            SafOpfRegistry.clear();
 
             handler.post(timer);
             LOG.d("SearchAllBooksWorker","searchPaths-all", 3, BookCSS.get().searchPathsJson);
@@ -103,6 +117,17 @@ public class SearchAllBooksWorker extends MessageWorker {
                             return false;
                         }
                     }
+                }
+            }
+
+            for (final String safPath : StringDB.asList(BookCSS.get().pathSAF)) {
+                if (TxtUtils.isEmpty(safPath)) {
+                    continue;
+                }
+                LOG.d("SAF Search in: " + safPath);
+                searchSAF(getApplicationContext(), Uri.parse(safPath), itemsMeta);
+                if (isStopped()) {
+                    return false;
                 }
             }
             if(itemsMeta.isEmpty()) {
@@ -184,6 +209,7 @@ public class SearchAllBooksWorker extends MessageWorker {
                 if (isStopped()) {
                     return false;
                 }
+                if (ExtUtils.isExteralSD(meta.getPath())) continue;
                 File file = new File(meta.getPath());
                 FileMetaCore.get().upadteBasicMeta(meta, file);
             }
@@ -196,10 +222,14 @@ public class SearchAllBooksWorker extends MessageWorker {
                 if (isStopped()) {
                     return false;
                 }
-                //if(FileMetaCore.isSafeToExtactBook(meta.getPath())) {
-                EbookMeta ebookMeta = FileMetaCore.get().getEbookMeta(meta.getPath(), CacheZipUtils.CacheDir.ZipService, true);
-                FileMetaCore.get().udpateFullMeta(meta, ebookMeta);
-                //}
+                if (ExtUtils.isExteralSD(meta.getPath())) {
+                    extractSAFMeta(meta);
+                } else {
+                    //if(FileMetaCore.isSafeToExtactBook(meta.getPath())) {
+                    EbookMeta ebookMeta = FileMetaCore.get().getEbookMeta(meta.getPath(), CacheZipUtils.CacheDir.ZipService, true);
+                    FileMetaCore.get().udpateFullMeta(meta, ebookMeta);
+                    //}
+                }
             }
 
             SharedBooks.updateProgress(itemsMeta, true, -1);
@@ -247,6 +277,152 @@ public class SearchAllBooksWorker extends MessageWorker {
 
 
     }
+
+    private void extractSAFMeta(FileMeta fileMeta) {
+        String displayName = TxtUtils.isNotEmpty(fileMeta.getPathTxt()) ? fileMeta.getPathTxt() : fileMeta.getTitle();
+        if (TxtUtils.isEmpty(displayName)) return;
+
+        if (AppState.get().isUseCalibreOpf) {
+            SafOpfRegistry.Entry entry = SafOpfRegistry.get(fileMeta.getPath());
+            if (entry != null && extractCalibreOpfMeta(fileMeta, entry, displayName)) {
+                return;
+            }
+        }
+
+        ParcelFileDescriptor pfd = null;
+        File linkFile = null;
+        try {
+            Uri uri = Uri.parse(fileMeta.getPath());
+            pfd = getApplicationContext().getContentResolver().openFileDescriptor(uri, "r");
+            if (pfd == null) return;
+
+            linkFile = new File(getApplicationContext().getCacheDir(), "saf_meta_" + displayName);
+            linkFile.delete();
+            Os.symlink("/proc/self/fd/" + pfd.getFd(), linkFile.getAbsolutePath());
+
+            EbookMeta ebookMeta = FileMetaCore.get().getEbookMeta(linkFile.getPath(), CacheZipUtils.CacheDir.ZipService, true);
+            FileMetaCore.get().udpateFullMeta(fileMeta, ebookMeta);
+
+            if (TxtUtils.isEmpty(fileMeta.getTitle())) {
+                fileMeta.setTitle(displayName);
+            }
+        } catch (Exception e) {
+            LOG.e(e);
+        } finally {
+            if (linkFile != null) linkFile.delete();
+            if (pfd != null) {
+                try { pfd.close(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    private boolean extractCalibreOpfMeta(FileMeta fileMeta, SafOpfRegistry.Entry entry, String displayName) {
+        ContentResolver cr = getApplicationContext().getContentResolver();
+        try (InputStream in = cr.openInputStream(entry.opfUri)) {
+            if (in == null) return false;
+            EbookMeta ebookMeta = CalirbeExtractor.getBookMetaInformationFromStream(
+                    in, SafOpfRegistry.coverResolver(cr, entry.siblingByLowerName));
+            if (ebookMeta == null) return false;
+            ebookMeta.setUnzipPath(fileMeta.getPath());
+            FileMetaCore.get().udpateFullMeta(fileMeta, ebookMeta);
+            if (TxtUtils.isEmpty(fileMeta.getTitle())) {
+                fileMeta.setTitle(displayName);
+            }
+            LOG.d("SAF Calibre meta applied", displayName, "cover=" + (ebookMeta.coverImage != null));
+            return true;
+        } catch (Exception e) {
+            LOG.e(e);
+            return false;
+        }
+    }
+
+    private static class SafChild {
+        final String name;
+        final Uri uri;
+        final String mimeType;
+        final String sizeStr;
+        final String modifiedStr;
+
+        SafChild(String name, Uri uri, String mimeType, String sizeStr, String modifiedStr) {
+            this.name = name;
+            this.uri = uri;
+            this.mimeType = mimeType;
+            this.sizeStr = sizeStr;
+            this.modifiedStr = modifiedStr;
+        }
+    }
+
+    private void searchSAF(Context context, Uri parentUri, List<FileMeta> items) {
+        try {
+            ContentResolver cr = context.getContentResolver();
+            Uri childrenUri = ExtUtils.getChildUri(context, parentUri);
+            if (childrenUri == null) return;
+
+            List<SafChild> children = new LinkedList<>();
+            Map<String, Uri> siblingByLowerName = new HashMap<>();
+
+            Cursor cursor = cr.query(childrenUri, new String[]{
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    DocumentsContract.Document.COLUMN_SIZE,
+                    DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+            }, null, null, null);
+            try {
+                while (cursor != null && cursor.moveToNext()) {
+                    String name = cursor.getString(0);
+                    String docId = cursor.getString(1);
+                    String mimeType = cursor.getString(2);
+                    String sizeStr = cursor.getString(3);
+                    String modifiedStr = cursor.getString(4);
+
+                    Uri docUri = DocumentsContract.buildDocumentUriUsingTree(parentUri, docId);
+                    children.add(new SafChild(name, docUri, mimeType, sizeStr, modifiedStr));
+                    if (name != null && !DocumentsContract.Document.MIME_TYPE_DIR.equals(mimeType)) {
+                        siblingByLowerName.put(name.toLowerCase(Locale.US), docUri);
+                    }
+                }
+            } finally {
+                if (cursor != null) cursor.close();
+            }
+
+            for (SafChild child : children) {
+                if (DocumentsContract.Document.MIME_TYPE_DIR.equals(child.mimeType)) {
+                    searchSAF(context, child.uri, items);
+                } else if (SearchCore.endWith(child.name, ExtUtils.seachExts)) {
+                    FileMeta meta = new FileMeta(child.uri.toString());
+                    meta.setTitle(child.name);
+                    meta.setPathTxt(child.name);
+                    meta.setExt(ExtUtils.getFileExtension(child.name));
+                    meta.setState(FileMetaCore.STATE_FULL);
+                    try {
+                        if (child.sizeStr != null) meta.setSize(Long.parseLong(child.sizeStr));
+                        if (child.modifiedStr != null) meta.setDate(Long.parseLong(child.modifiedStr));
+                    } catch (NumberFormatException ignored) {}
+                    items.add(meta);
+
+                    Uri opfUri = findCalibreOpf(child.name, siblingByLowerName);
+                    if (opfUri != null) {
+                        SafOpfRegistry.register(child.uri.toString(),
+                                new SafOpfRegistry.Entry(opfUri, siblingByLowerName));
+                        LOG.d("SAF Calibre OPF for", child.name, opfUri);
+                    }
+                    LOG.d("SAF Search found:", child.name, child.uri.toString());
+                }
+            }
+        } catch (Exception e) {
+            LOG.e(e);
+        }
+    }
+
+    private static Uri findCalibreOpf(String bookName, Map<String, Uri> siblingByLowerName) {
+        if (siblingByLowerName.isEmpty()) return null;
+        Uri byBaseName = siblingByLowerName.get(
+                ExtUtils.getFileNameWithoutExt(bookName).toLowerCase(Locale.US) + ".opf");
+        if (byBaseName != null) return byBaseName;
+        return siblingByLowerName.get("metadata.opf");
+    }
+
 
     public void updateBookAnnotations() {
 

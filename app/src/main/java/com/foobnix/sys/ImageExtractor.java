@@ -47,6 +47,7 @@ import com.foobnix.pdf.info.ExtUtils;
 import com.foobnix.pdf.info.IMG;
 import com.foobnix.pdf.info.PageUrl;
 import com.foobnix.pdf.info.R;
+import com.foobnix.pdf.info.SafOpfRegistry;
 import com.foobnix.pdf.info.TintUtil;
 import com.foobnix.pdf.info.model.BookCSS;
 import com.foobnix.pdf.info.wrapper.MagicHelper;
@@ -285,6 +286,97 @@ public class ImageExtractor {
     }
 
 
+    private Bitmap renderCoverFromSafOpf(SafOpfRegistry.Entry entry, int width) {
+        try (InputStream in = c.getContentResolver().openInputStream(entry.opfUri)) {
+            if (in == null) return null;
+            EbookMeta meta = CalirbeExtractor.getBookMetaInformationFromStream(
+                    in, SafOpfRegistry.coverResolver(c.getContentResolver(), entry.siblingByLowerName));
+            if (meta == null || meta.coverImage == null) return null;
+            return BaseExtractor.arrayToBitmap(meta.coverImage, width);
+        } catch (Exception e) {
+            LOG.e(e);
+            return null;
+        }
+    }
+
+    private Bitmap proccessSAFCoverPage(PageUrl pageUrl) {
+        Uri uri = Uri.parse(pageUrl.getPath());
+        String displayName = ExtUtils.getFileName(pageUrl.getPath());
+        ParcelFileDescriptor pfd = null;
+        File linkFile = null;
+        try {
+            Cursor cursor = c.getContentResolver().query(uri,
+                    new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null);
+            if (cursor != null) {
+                try {
+                    if (cursor.moveToFirst()) displayName = cursor.getString(0);
+                } finally {
+                    cursor.close();
+                }
+            }
+
+            if (AppState.get().isUseCalibreOpf) {
+                SafOpfRegistry.Entry entry = SafOpfRegistry.get(pageUrl.getPath());
+                if (entry != null) {
+                    Bitmap opfCover = renderCoverFromSafOpf(entry, pageUrl.getWidth());
+                    if (opfCover != null) return opfCover;
+                }
+            }
+
+            pfd = c.getContentResolver().openFileDescriptor(uri, "r");
+            if (pfd == null) return BaseExtractor.getBookCoverWithTitle("", displayName, true);
+
+            linkFile = new File(c.getCacheDir(), "saf_cover_" + displayName);
+            linkFile.delete();
+            android.system.Os.symlink("/proc/self/fd/" + pfd.getFd(), linkFile.getAbsolutePath());
+
+            String linkPath = linkFile.getPath();
+            EbookMeta ebookMeta = FileMetaCore.get().getEbookMeta(linkPath, CacheDir.ZipApp, true);
+            String unZipPath = ebookMeta.getUnzipPath();
+
+            FileMeta fileMeta = AppDB.get().getOrCreate(pageUrl.getPath());
+            if (fileMeta.getState() != FileMetaCore.STATE_FULL) {
+                FileMetaCore.get().udpateFullMeta(fileMeta, ebookMeta);
+                if (com.foobnix.android.utils.TxtUtils.isEmpty(fileMeta.getTitle())) fileMeta.setTitle(displayName);
+                AppDB.get().save(fileMeta);
+            }
+
+            Bitmap cover = null;
+            if (ebookMeta.coverImage != null) {
+                cover = BaseExtractor.arrayToBitmap(ebookMeta.coverImage, pageUrl.getWidth());
+            } else if (BookType.EPUB.is(unZipPath)) {
+                cover = BaseExtractor.arrayToBitmap(EpubExtractor.get().getBookCover(unZipPath), pageUrl.getWidth());
+            } else if (BookType.FB2.is(unZipPath)) {
+                cover = BaseExtractor.arrayToBitmap(Fb2Extractor.get().getBookCover(unZipPath), pageUrl.getWidth());
+            } else if (BookType.MOBI.is(unZipPath)) {
+                cover = BaseExtractor.arrayToBitmap(MobiExtract.getBookCover(unZipPath), pageUrl.getWidth());
+            } else if (BookType.CBZ.is(unZipPath) || BookType.CBR.is(unZipPath)) {
+                cover = BaseExtractor.arrayToBitmap(CbzCbrExtractor.getBookCover(unZipPath), pageUrl.getWidth());
+            } else if (BookType.PDF.is(unZipPath) || BookType.DJVU.is(unZipPath)) {
+                PageUrl symPageUrl = PageUrl.build(linkPath, pageUrl.getPage(), pageUrl.getWidth(), pageUrl.getHeight());
+                if (BookType.PDF.is(unZipPath) && Build.VERSION.SDK_INT >= 29) {
+                    cover = coverPDFNative(symPageUrl);
+                }
+                if (cover == null) cover = proccessOtherPage(symPageUrl);
+            }
+
+            if (cover == null) {
+                String title = com.foobnix.android.utils.TxtUtils.isNotEmpty(fileMeta.getTitle()) ? fileMeta.getTitle() : displayName;
+                cover = BaseExtractor.getBookCoverWithTitle(fileMeta.getAuthor(), title, true);
+                pageUrl.tempWithWatermakr = true;
+            }
+            return cover;
+        } catch (Exception e) {
+            LOG.e(e);
+            return BaseExtractor.getBookCoverWithTitle("", displayName, true);
+        } finally {
+            if (linkFile != null) linkFile.delete();
+            if (pfd != null) {
+                try { pfd.close(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
     public Bitmap proccessCoverPage(PageUrl pageUrl) {
         String path = pageUrl.getPath();
 
@@ -293,41 +385,7 @@ public class ImageExtractor {
         }
 
         if (ExtUtils.isExteralSD(path)) {
-            try {
-                Uri uri = Uri.parse(path);
-                String displayName = "saf_cover";
-                long remoteModified = 0;
-                Cursor cursor = c.getContentResolver().query(uri,
-                        new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                                     DocumentsContract.Document.COLUMN_LAST_MODIFIED}, null, null, null);
-                if (cursor != null) {
-                    try {
-                        if (cursor.moveToFirst()) {
-                            displayName = cursor.getString(0);
-                            remoteModified = cursor.getLong(1);
-                        }
-                    } finally {
-                        cursor.close();
-                    }
-                }
-                File tempFile = new File(CacheDir.ZipApp.getDir(), "saf_" + displayName);
-                if (!tempFile.exists() || tempFile.lastModified() < remoteModified) {
-                    try (InputStream in = c.getContentResolver().openInputStream(uri);
-                         FileOutputStream out = new FileOutputStream(tempFile)) {
-                        byte[] buf = new byte[65536];
-                        int n;
-                        while ((n = in.read(buf)) != -1) {
-                            out.write(buf, 0, n);
-                        }
-                    }
-                    tempFile.setLastModified(remoteModified);
-                }
-                path = tempFile.getAbsolutePath();
-                pageUrl.setPath(path);
-            } catch (Exception e) {
-                LOG.e(e);
-                return BaseExtractor.getBookCoverWithTitle("", ExtUtils.getFileName(pageUrl.getPath()), true);
-            }
+            return proccessSAFCoverPage(pageUrl);
         }
 
         if (AppState.get().isFolderPreview) {
