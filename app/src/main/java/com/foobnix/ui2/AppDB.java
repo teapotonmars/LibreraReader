@@ -226,7 +226,7 @@ public class AppDB {
             return;
         }
 
-        if (!new File(path).isFile()) {
+        if (!path.startsWith("content://") && !new File(path).isFile()) {
             LOG.d("Can't add to recent, it's not a file", path);
             return;
         }

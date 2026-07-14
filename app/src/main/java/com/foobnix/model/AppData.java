@@ -403,7 +403,7 @@ public class AppData {
         for (SimpleMeta it : recent) {
             SimpleMeta s = SimpleMeta.SyncSimpleMeta(it);
 
-            if (!new File(s.getPath()).isFile()) {
+            if (!s.getPath().startsWith("content://") && !new File(s.getPath()).isFile()) {
                 LOG.d("getAllRecent can't find file", s.getPath());
                 continue;
             }

@@ -162,7 +162,7 @@ public abstract class HorizontalModeController extends DocumentController {
         }
 
         AppDB.get()
-             .addRecent(bookPath);
+             .addRecent(ExtUtils.recentPathFromIntent(activity.getIntent(), bookPath));
 
         float percent = Intents.getFloatAndClear(activity.getIntent(), DocumentController.EXTRA_PERCENT);
 

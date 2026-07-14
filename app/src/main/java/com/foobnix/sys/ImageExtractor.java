@@ -4,6 +4,8 @@ import static com.foobnix.pdf.info.io.SearchCore.SUPPORTED_EXT_FILES_ONLY;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.provider.DocumentsContract;
 import android.graphics.Bitmap;
 import android.graphics.Bitmap.CompressFormat;
 import android.graphics.BitmapFactory;
@@ -71,6 +73,7 @@ import org.ebookdroid.droids.mupdf.codec.exceptions.MuPdfPasswordException;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -287,6 +290,44 @@ public class ImageExtractor {
 
         if (pageUrl.getHeight() == 0) {
             pageUrl.setHeight((int) (pageUrl.getWidth() * 1.5));
+        }
+
+        if (ExtUtils.isExteralSD(path)) {
+            try {
+                Uri uri = Uri.parse(path);
+                String displayName = "saf_cover";
+                long remoteModified = 0;
+                Cursor cursor = c.getContentResolver().query(uri,
+                        new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                                     DocumentsContract.Document.COLUMN_LAST_MODIFIED}, null, null, null);
+                if (cursor != null) {
+                    try {
+                        if (cursor.moveToFirst()) {
+                            displayName = cursor.getString(0);
+                            remoteModified = cursor.getLong(1);
+                        }
+                    } finally {
+                        cursor.close();
+                    }
+                }
+                File tempFile = new File(CacheDir.ZipApp.getDir(), "saf_" + displayName);
+                if (!tempFile.exists() || tempFile.lastModified() < remoteModified) {
+                    try (InputStream in = c.getContentResolver().openInputStream(uri);
+                         FileOutputStream out = new FileOutputStream(tempFile)) {
+                        byte[] buf = new byte[65536];
+                        int n;
+                        while ((n = in.read(buf)) != -1) {
+                            out.write(buf, 0, n);
+                        }
+                    }
+                    tempFile.setLastModified(remoteModified);
+                }
+                path = tempFile.getAbsolutePath();
+                pageUrl.setPath(path);
+            } catch (Exception e) {
+                LOG.e(e);
+                return BaseExtractor.getBookCoverWithTitle("", ExtUtils.getFileName(pageUrl.getPath()), true);
+            }
         }
 
         if (AppState.get().isFolderPreview) {
@@ -670,8 +711,12 @@ public class ImageExtractor {
                 if (ExtUtils.isImagePath(path)) {
                     return c.getContentResolver().openInputStream(Uri.parse(path));
                 }
-                String display = ExtUtils.getFileName(Uri.decode(path));
-                return messageFile("", display);
+                int safPage = pageUrl.getPage();
+                if (safPage != COVER_PAGE && safPage != COVER_PAGE_WITH_EFFECT && safPage != COVER_PAGE_NO_EFFECT) {
+                    String display = ExtUtils.getFileName(Uri.decode(path));
+                    return messageFile("", display);
+                }
+                // fall through to cover extraction below
             }
 
             if (path.startsWith(Clouds.PREFIX_CLOUD)) {

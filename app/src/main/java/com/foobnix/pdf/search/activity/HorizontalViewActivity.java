@@ -1563,6 +1563,9 @@ public class HorizontalViewActivity extends AdsFragmentActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (isFinishing()) {
+            ExtUtils.closeSafPfd();
+        }
 
         if (loadinAsyncTask != null) {
             try {

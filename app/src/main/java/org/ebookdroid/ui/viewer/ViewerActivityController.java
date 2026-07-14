@@ -156,7 +156,7 @@ public class ViewerActivityController extends ActionController<VerticalViewActiv
 
             wrapperControlls.hideShowEditIcon();
 
-            controller.addRecent(filePath);
+            controller.addRecent(ExtUtils.recentPathFromIntent(intent, filePath));
             SettingsManager.getBookSettings(filePath);
 
             final AppBook.Diff diff = new AppBook.Diff(null, SettingsManager.getBookSettings());

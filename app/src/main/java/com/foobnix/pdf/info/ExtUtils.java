@@ -16,6 +16,8 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
+import android.system.Os;
 import android.provider.DocumentsContract;
 import android.text.format.DateFormat;
 import android.text.format.Formatter;
@@ -117,6 +119,21 @@ public class ExtUtils {
     private static final String IMAGE_END = "<image-end>";
     public static Map<String, String> mimeCache = new HashMap<String, String>();
     public static List<String> seachExts = new ArrayList<String>();
+
+    private static volatile ParcelFileDescriptor safPfd = null;
+    public static volatile String pendingSAFUri = null;
+
+    public static void closeSafPfd() {
+        if (safPfd != null) {
+            try { safPfd.close(); } catch (Exception ignore) {}
+            safPfd = null;
+        }
+    }
+
+    public static String recentPathFromIntent(android.content.Intent intent, String localPath) {
+        String safUri = intent.getStringExtra("SAF_ORIGINAL_URI");
+        return safUri != null ? safUri : localPath;
+    }
     static List<String> video = Arrays.asList(".webm",
                                               ".m3u8",
                                               ".ts",
@@ -315,35 +332,49 @@ public class ExtUtils {
     }
 
     public static void openFile(Activity a, FileMeta meta) {
-        File file = new File(meta.getPath());
-
         if (ExtUtils.isExteralSD(meta.getPath())) {
             LOG.d("openFile isExteralSD");
-            CacheZipUtils.removeFiles(CacheZipUtils.ATTACHMENTS_CACHE_DIR.listFiles());
-            Uri uri = Uri.parse(meta.getPath());
-            file = new File(CacheZipUtils.ATTACHMENTS_CACHE_DIR, meta.getTitle());
-            if (!file.exists()) {
+            final Uri uri = Uri.parse(meta.getPath());
+            final String displayName = (meta.getPathTxt() != null && !meta.getPathTxt().isEmpty())
+                    ? meta.getPathTxt() : meta.getTitle();
+            final String originalSafUri = meta.getPath();
+            final Handler mainHandler = new Handler(Looper.getMainLooper());
+            new Thread(() -> {
                 try {
-                    InputStream inputStream = a.getContentResolver().openInputStream(uri);
-                    if (inputStream == null) {
-                        Toast.makeText(a, R.string.incorrect_value, Toast.LENGTH_SHORT).show();
+                    if (safPfd != null) {
+                        try { safPfd.close(); } catch (Exception ignore) {}
+                        safPfd = null;
+                    }
+                    ParcelFileDescriptor pfd = a.getContentResolver().openFileDescriptor(uri, "r");
+                    if (pfd == null) {
+                        mainHandler.post(() -> Toast.makeText(a, R.string.incorrect_value, Toast.LENGTH_SHORT).show());
                         return;
                     }
-                    CacheZipUtils.copyFile(inputStream, file);
-                    LOG.d("Create-file", file.getPath(), file.length());
+                    safPfd = pfd;
+                    File linkFile = new File(a.getCacheDir(), "saf_current_" + displayName);
+                    linkFile.delete();
+                    Os.symlink("/proc/self/fd/" + pfd.getFd(), linkFile.getAbsolutePath());
+                    LOG.d("openFile SAF symlink", linkFile.getPath(), "fd=" + pfd.getFd());
+                    mainHandler.post(() -> openLocalFile(a, linkFile, originalSafUri));
                 } catch (Exception e) {
                     LOG.e(e);
+                    mainHandler.post(() -> Toast.makeText(a, R.string.incorrect_value, Toast.LENGTH_SHORT).show());
                 }
-            }
+            }).start();
+            return;
         }
 
+        openLocalFile(a, new File(meta.getPath()), null);
+    }
+
+    private static void openLocalFile(Activity a, File file, String safUri) {
         if (ExtUtils.doifFileExists(a, file)) {
 
             if (ExtUtils.isZip(file)) {
 
                 LOG.d("openFile isExteralSD zip");
                 if (CacheZipUtils.isSingleAndSupportEntry(file.getPath()).first) {
-                    ExtUtils.showDocumentWithoutDialog2(a, file);
+                    ExtUtils.showDocumentWithoutDialog2(a, file, safUri);
                 } else {
                     ZipDialog.show(a, file, null);
                 }
@@ -352,7 +383,7 @@ public class ExtUtils {
                 ExtUtils.openWith(a, file);
             } else {
                 LOG.d("openFile isExteralSD normal");
-                ExtUtils.showDocumentWithoutDialog2(a, file);
+                ExtUtils.showDocumentWithoutDialog2(a, file, safUri);
             }
         }
     }
@@ -767,6 +798,10 @@ public class ExtUtils {
     }
 
     public static boolean showDocumentWithoutDialog2(final Context c, final File file) {
+        return showDocumentWithoutDialog2(c, file, null);
+    }
+
+    public static boolean showDocumentWithoutDialog2(final Context c, final File file, final String safUri) {
         if (c == null) {
             return false;
         }
@@ -777,19 +812,23 @@ public class ExtUtils {
 
             if (AppState.get().prefScrollMode.contains(ext)) {
                 AppSP.get().readingMode = AppState.READING_MODE_SCROLL;
+                pendingSAFUri = safUri;
                 showDocumentWithoutDialog(c, file, null);
                 return true;
             } else if (AppState.get().prefBookMode.contains(ext)) {
                 AppSP.get().readingMode = AppState.READING_MODE_BOOK;
+                pendingSAFUri = safUri;
                 showDocumentWithoutDialog(c, file, null);
                 return true;
             } else if (AppState.get().prefMusicianMode.contains(ext)) {
                 AppSP.get().readingMode = AppState.READING_MODE_MUSICIAN;
+                pendingSAFUri = safUri;
                 showDocumentWithoutDialog(c, file, null);
                 return true;
             }
         }
         if (AppState.get().isRememberMode) {
+            pendingSAFUri = safUri;
             showDocumentWithoutDialog(c, file, null);
             return true;
         }
@@ -910,6 +949,7 @@ public class ExtUtils {
             @Override public void onClick(View v) {
                 dialog.dismiss();
                 AppSP.get().readingMode = AppState.READING_MODE_SCROLL;
+                pendingSAFUri = safUri;
                 showDocumentWithoutDialog(c, file, null);
             }
         });
@@ -917,6 +957,7 @@ public class ExtUtils {
             @Override public void onClick(View v) {
                 dialog.dismiss();
                 AppSP.get().readingMode = AppState.READING_MODE_BOOK;
+                pendingSAFUri = safUri;
                 showDocumentWithoutDialog(c, file, null);
             }
         });
@@ -925,6 +966,7 @@ public class ExtUtils {
             @Override public void onClick(View v) {
                 dialog.dismiss();
                 AppSP.get().readingMode = AppState.READING_MODE_MUSICIAN;
+                pendingSAFUri = safUri;
                 showDocumentWithoutDialog(c, file, null);
             }
         });
@@ -1018,6 +1060,11 @@ public class ExtUtils {
         }
         intent.setData(checkPlaylisturi(uri, intent, playlist));
 
+        if (pendingSAFUri != null) {
+            intent.putExtra("SAF_ORIGINAL_URI", pendingSAFUri);
+            pendingSAFUri = null;
+        }
+
         c.startActivity(intent);
     }
 
@@ -1086,6 +1133,12 @@ public class ExtUtils {
             intent.putExtra(DocumentController.EXTRA_BOOKMARK_TEXT, bookmarkText);
             intent.putExtra(DocumentController.EXTRA_BOOKMARK_PAGE_TEXT, bookmarkPageText);
         }
+
+        if (pendingSAFUri != null) {
+            intent.putExtra("SAF_ORIGINAL_URI", pendingSAFUri);
+            pendingSAFUri = null;
+        }
+
         c.startActivity(intent);
 
         // FileMetaDB.get().addRecent(file.getPath());
@@ -1953,7 +2006,8 @@ public class ExtUtils {
         Iterator<FileMeta> iterator = all.iterator();
         while (iterator.hasNext()) {
             FileMeta next = iterator.next();
-            if (!new File(next.getPath()).exists()) {
+            String path = next.getPath();
+            if (!path.startsWith("content://") && !new File(path).exists()) {
                 iterator.remove();
             }
         }

@@ -299,6 +299,9 @@ public class VerticalViewActivity extends AbstractActionActivity<VerticalViewAct
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (isFinishing()) {
+            ExtUtils.closeSafPfd();
+        }
         if (handler != null) {
             handler.removeCallbacksAndMessages(null);
         }
