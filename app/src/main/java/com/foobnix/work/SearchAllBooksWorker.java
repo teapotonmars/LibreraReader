@@ -113,15 +113,19 @@ public class SearchAllBooksWorker extends MessageWorker {
             handler.post(timer);
             LOG.d("SearchAllBooksWorker", "searchPaths-all", 3, BookCSS.get().searchPathsJson);
             for (final String path : JsonDB.get(BookCSS.get().searchPathsJson)) {
-                if (path != null) {
+                if (path == null) continue;
+                if (ExtUtils.isExteralSD(path)) {
+                    LOG.d("SAF Search in: " + path);
+                    searchSAF(getApplicationContext(), Uri.parse(path), itemsMeta);
+                } else {
                     final File root = new File(path);
                     if (root.isDirectory()) {
                         LOG.d("Search in: " + root.getPath());
                         SearchCore.search(itemsMeta, root, ExtUtils.seachExts);
-                        if (isStopped()) {
-                            return false;
-                        }
                     }
+                }
+                if (isStopped()) {
+                    return false;
                 }
             }
 

@@ -9,7 +9,6 @@ import android.content.DialogInterface;
 import android.content.DialogInterface.OnDismissListener;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.net.Uri;
 import android.os.Environment;
 import android.text.TextUtils.TruncateAt;
 import android.view.LayoutInflater;
@@ -160,11 +159,10 @@ public class PrefDialogs {
                 dialog.dismiss();
             }
         });
-        recentAdapter.setOnDeleClick(new ResultResponse<Uri>() {
+        recentAdapter.setOnDeleClick(new ResultResponse<String>() {
 
             @Override
-            public boolean onResultRecive(Uri result) {
-                final String path = result.getPath();
+            public boolean onResultRecive(String path) {
                 AlertDialogs.showDialog(a, a.getString(R.string.remove_library_folder) + "\n\n" + path, a.getString(R.string.remove), () -> {
                     LOG.d("TEST", "Remove " + path);
                     BookCSS.get().searchPathsJson = JsonDB.remove(BookCSS.get().searchPathsJson, path);

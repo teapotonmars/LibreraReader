@@ -24,6 +24,7 @@ import com.foobnix.pdf.info.AppsConfig;
 import com.foobnix.pdf.info.IMG;
 import com.foobnix.pdf.info.Prefs;
 import com.foobnix.pdf.info.TintUtil;
+import com.foobnix.sys.ImageExtractor;
 import com.foobnix.sys.TempHolder;
 import com.foobnix.tts.TTSNotification;
 import com.google.android.gms.ads.MobileAds;
@@ -79,6 +80,12 @@ public class LibreraApp extends Application {
         AppsConfig.init(this);
         Dips.init(this);
         Prefs.get().init(this);
+
+        // The #crash-detection flag in ImageExtractor is persisted, so a native crash
+        // mid-extraction leaves an entry that turns every retry into "#crash" until the
+        // next full rescan clears it. Cold start clears it so each session gets one fresh try.
+        ImageExtractor.getInstance(this);
+        ImageExtractor.clearErrors();
 
         try {
             if (AppsConfig.isShowAdsInApp(this)) {

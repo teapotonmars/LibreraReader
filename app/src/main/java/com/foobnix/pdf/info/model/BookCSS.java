@@ -251,7 +251,8 @@ public class BookCSS {
 
         List<String> res = new ArrayList<>();
         for (String item : objects) {
-            if (TxtUtils.isNotEmpty(item) && new File(item).isDirectory()) {
+            if (TxtUtils.isEmpty(item)) continue;
+            if (item.startsWith("content://") || new File(item).isDirectory()) {
                 res.add(item);
             }
         }
