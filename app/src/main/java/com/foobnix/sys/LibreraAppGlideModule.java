@@ -191,11 +191,12 @@ public class LibreraAppGlideModule extends AppGlideModule {
 //        builder.setDiskCache(new DiskLruCacheFactory(f.getPath(), diskCacheSizeBytes));
 
 
+        int coverThreads = Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors()));
         builder.setSourceExecutor(
                 newSourceBuilder()
 
                         .setUncaughtThrowableStrategy(GlideExecutor.UncaughtThrowableStrategy.IGNORE)
-                        .setThreadCount(1)
+                        .setThreadCount(coverThreads)
                         //.setThreadTimeoutMillis(2000)
                         .build());
 

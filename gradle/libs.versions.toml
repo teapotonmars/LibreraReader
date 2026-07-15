@@ -93,7 +93,7 @@ firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "fir
 glide-compiler = { module = "com.github.bumptech.glide:compiler", version = "4.16.0" }#not update
 glide = { module = "com.github.bumptech.glide:glide", version = "4.16.0" } #not update
 mammoth = { module = "org.zwobble.mammoth:mammoth", version = "1.5.0" } #app not compatible with new versions
-
+glide-recyclerview = { module = "com.github.bumptech.glide:recyclerview-integration", version = "4.16.0" }
 google-api-client-android = { module = "com.google.api-client:google-api-client-android", version = "2.9.0" }
 google-api-services-drive = { module = "com.google.apis:google-api-services-drive", version = "v3-rev20260712-2.0.0" }
 google-http-client-gson = { module = "com.google.http-client:google-http-client-gson", version = "2.1.1" }

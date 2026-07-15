@@ -28,6 +28,11 @@ import androidx.recyclerview.widget.RecyclerView;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import com.bumptech.glide.Glide;
+import com.bumptech.glide.ListPreloader.PreloadModelProvider;
+import com.bumptech.glide.ListPreloader.PreloadSizeProvider;
+import com.bumptech.glide.RequestBuilder;
+import com.bumptech.glide.integration.recyclerview.RecyclerViewPreloader;
+import com.bumptech.glide.util.FixedPreloadSizeProvider;
 import com.foobnix.LibreraApp;
 import com.foobnix.android.utils.Apps;
 import com.foobnix.android.utils.Dips;
@@ -49,6 +54,7 @@ import com.foobnix.sys.TempHolder;
 import com.foobnix.ui2.MainTabs2;
 import com.foobnix.ui2.adapter.AuthorsAdapter2;
 import com.foobnix.ui2.adapter.DefaultListeners;
+import com.foobnix.dao2.FileMeta;
 import com.foobnix.ui2.adapter.FileMetaAdapter;
 import com.foobnix.ui2.fast.FastScrollRecyclerView;
 import com.foobnix.ui2.fast.FastScrollStateChangeListener;
@@ -59,6 +65,7 @@ import org.greenrobot.eventbus.ThreadMode;
 
 import java.util.Arrays;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public abstract class UIFragment<T> extends Fragment {
@@ -74,6 +81,7 @@ public abstract class UIFragment<T> extends Fragment {
     private boolean headerPainted;
     /** A notice the tab raises in the chrome, painted with it rather than against it. */
     private final List<View> floatingNotices = new ArrayList<View>();
+    private RecyclerViewPreloader<FileMeta> coverPreloader;
     Handler handler;
     View adFrame;
     SwipeRefreshLayout swipeRefreshLayout;
@@ -595,6 +603,13 @@ public abstract class UIFragment<T> extends Fragment {
             PopupHelper.updateGridOrListIcon(onGridlList, mode);
         }
 
+        // Any previously attached cover preloader is bound to the old adapter/layout.
+        // Detach before swapping layouts; we'll rebind for grid/covers modes below.
+        if (coverPreloader != null) {
+            recyclerView.removeOnScrollListener(coverPreloader);
+            coverPreloader = null;
+        }
+
         if (mode == AppState.MODE_LIST) {
             RecyclerView.LayoutManager mLayoutManager = new LinearLayoutManager(getActivity());
             recyclerView.setLayoutManager(mLayoutManager);
@@ -650,6 +665,11 @@ public abstract class UIFragment<T> extends Fragment {
             recyclerView.setLayoutManager(mGridManager);
             recyclerView.setAdapter(searchAdapter);
 
+            coverPreloader = buildCoverPreloader(searchAdapter);
+            if (coverPreloader != null) {
+                recyclerView.addOnScrollListener(coverPreloader);
+            }
+
         } else if (Arrays.asList(AppState.MODE_PUBLICATION_DATE, AppState.MODE_PUBLISHER, AppState.MODE_AUTHORS, AppState.MODE_SERIES, AppState.MODE_GENRE, AppState.MODE_USER_TAGS, AppState.MODE_KEYWORDS, AppState.MODE_LANGUAGES)
                          .contains(mode)) {
             RecyclerView.LayoutManager mLayoutManager = new LinearLayoutManager(getActivity());
@@ -696,6 +716,36 @@ public abstract class UIFragment<T> extends Fragment {
         if (recyclerView instanceof FastScrollRecyclerView) {
             ((FastScrollRecyclerView) recyclerView).myConfiguration();
         }
+    }
+
+    private RecyclerViewPreloader<FileMeta> buildCoverPreloader(final FileMetaAdapter searchAdapter) {
+        if (getActivity() == null || searchAdapter == null) return null;
+        final int imageSize = IMG.getImageSize();
+
+        PreloadModelProvider<FileMeta> modelProvider = new PreloadModelProvider<FileMeta>() {
+            @Override public List<FileMeta> getPreloadItems(int position) {
+                if (position < 0 || position >= searchAdapter.getItemCount()) {
+                    return Collections.emptyList();
+                }
+                int type = searchAdapter.getItemViewType(position);
+                if (type != FileMetaAdapter.DISPLAY_TYPE_FILE) {
+                    return Collections.emptyList();
+                }
+                FileMeta item = searchAdapter.getItem(position);
+                if (item == null || TxtUtils.isEmpty(item.getPath())) {
+                    return Collections.emptyList();
+                }
+                return Collections.singletonList(item);
+            }
+
+            @Override public RequestBuilder<?> getPreloadRequestBuilder(FileMeta item) {
+                return IMG.getCoverPageWithEffect(getActivity(), item.getPath(), null);
+            }
+        };
+
+        PreloadSizeProvider<FileMeta> sizeProvider = new FixedPreloadSizeProvider<>(imageSize, imageSize);
+        // Preload roughly one grid's worth ahead; direction flips automatically on scroll reverse.
+        return new RecyclerViewPreloader<>(Glide.with(getActivity()), modelProvider, sizeProvider, 12);
     }
 
     public boolean onKeyDown(int keyCode) {

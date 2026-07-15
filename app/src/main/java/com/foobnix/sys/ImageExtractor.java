@@ -81,6 +81,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicLong;
 
 import mobi.librera.smartreflow.AndroidPlatformImage;
 import mobi.librera.smartreflow.SmartReflow1;
@@ -90,6 +91,7 @@ public class ImageExtractor {
     public static final int COVER_PAGE_WITH_EFFECT = -3;
     public static final int COVER_PAGE_NO_EFFECT = -2;
     public static final int COVER_PAGE = -1;
+    private static final AtomicLong safCoverCounter = new AtomicLong();
     public static SharedPreferences sp;
     public static volatile CodecDocument codeCache;
     public static volatile CodecContext codecContex;
@@ -326,7 +328,8 @@ public class ImageExtractor {
             pfd = c.getContentResolver().openFileDescriptor(uri, "r");
             if (pfd == null) return BaseExtractor.getBookCoverWithTitle("", displayName, true);
 
-            linkFile = new File(c.getCacheDir(), "saf_cover_" + displayName);
+            long uniq = safCoverCounter.incrementAndGet();
+            linkFile = new File(c.getCacheDir(), "saf_cover_" + uniq + "_" + displayName);
             linkFile.delete();
             android.system.Os.symlink("/proc/self/fd/" + pfd.getFd(), linkFile.getAbsolutePath());
 

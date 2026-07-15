@@ -49,14 +49,23 @@ import org.ebookdroid.common.settings.books.SharedBooks;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicLong;
 
 
 public class SearchAllBooksWorker extends MessageWorker {
+
+    private static final AtomicLong safLinkCounter = new AtomicLong();
 
     Handler handler;
     List<FileMeta> itemsMeta;
@@ -79,9 +88,10 @@ public class SearchAllBooksWorker extends MessageWorker {
 
 
     public boolean doWorkInner() {
-        LOG.d("worker-starts","SearchAllBooksWorker");
+        LOG.d("worker-starts", "SearchAllBooksWorker");
         String errorID = AppProfile.getCurrent();
         Prefs.get().put(errorID, 0);
+        ExecutorService executor = null;
         try {
             Tags2.migration();
             itemsMeta = new LinkedList<FileMeta>();
@@ -89,24 +99,19 @@ public class SearchAllBooksWorker extends MessageWorker {
             AppProfile.init(getApplicationContext());
 
             ImageExtractor.clearErrors();
-            IMG.clearDiscCache();
+            // Incremental: keep IMG disc/memory cache — covers of unchanged books stay valid.
 
-            handler.post(new Runnable() {
-                @Override
-                public void run() {
-                    IMG.clearMemoryCache();
-                }
-            });
-
-
-            AppDB.get().deleteAllData();
-
-
-            itemsMeta.clear();
             SafOpfRegistry.clear();
 
+            // Snapshot existing DB rows so we can diff against discovery and reuse rows
+            // (preserving user fields like stars, tags, annotations).
+            Map<String, FileMeta> existingByPath = new HashMap<>();
+            for (FileMeta m : AppDB.get().getAll()) {
+                existingByPath.put(m.getPath(), m);
+            }
+
             handler.post(timer);
-            LOG.d("SearchAllBooksWorker","searchPaths-all", 3, BookCSS.get().searchPathsJson);
+            LOG.d("SearchAllBooksWorker", "searchPaths-all", 3, BookCSS.get().searchPathsJson);
             for (final String path : JsonDB.get(BookCSS.get().searchPathsJson)) {
                 if (path != null) {
                     final File root = new File(path);
@@ -130,26 +135,26 @@ public class SearchAllBooksWorker extends MessageWorker {
                     return false;
                 }
             }
-            if(itemsMeta.isEmpty()) {
+            if (itemsMeta.isEmpty()) {
                 File downloadsDir = AppSP.get().getTempDownloadBooks(getApplicationContext());
                 downloadsDir.mkdirs();
 
                 try {
                     String[] books = getApplicationContext().getAssets().list("books");
-                    for(String book:books) {
+                    for (String book : books) {
                         File outFile = new File(downloadsDir, book);
                         FileOutputStream out = new FileOutputStream(outFile);
-                        IOUtils.copyClose(getApplicationContext().getAssets().open("books/"+book), out);
-                        LOG.d("copyBook", book,outFile );
+                        IOUtils.copyClose(getApplicationContext().getAssets().open("books/" + book), out);
+                        LOG.d("copyBook", book, outFile);
                     }
-                }catch (Exception e){
+                } catch (Exception e) {
                     LOG.e(e);
                 }
 
                 SearchCore.search(itemsMeta, downloadsDir, ExtUtils.seachExts);
             }
 
-            if(AppState.get().isExperimental) {
+            if (AppState.get().isExperimental) {
                 if (itemsMeta.isEmpty()) {
                     File path = AppProfile.DOWNLOADS_DIR;
                     BookCSS.get().searchPathsJson = JsonDB.set(List.of(path.getPath()));
@@ -183,7 +188,9 @@ public class SearchAllBooksWorker extends MessageWorker {
                         if (isStopped()) {
                             return false;
                         }
-                        if (meta.getTitle().equals(sync.getTitle()) && !meta.getPath().equals(sync.getPath())) {
+                        if (meta.getTitle() != null
+                                && meta.getTitle().equals(sync.getTitle())
+                                && !meta.getPath().equals(sync.getPath())) {
                             meta.setIsSearchBook(false);
                             LOG.d("Worker", "remove-dublicate", meta.getPath());
                         }
@@ -196,8 +203,50 @@ public class SearchAllBooksWorker extends MessageWorker {
             itemsMeta.addAll(AppData.get().getAllFavoriteFiles(false));
             itemsMeta.addAll(AppData.get().getAllFavoriteFolders());
 
+            // Merge discoveries with existing DB rows. Reused rows preserve user state;
+            // for SAF, size/date/pathTxt are refreshed from the current SAF listing.
+            Set<String> discoveredPaths = new HashSet<>();
+            List<FileMeta> merged = new ArrayList<>(itemsMeta.size());
+            List<FileMeta> toProcess = new ArrayList<>();
 
-            AppDB.get().saveAll(itemsMeta);
+            for (FileMeta discovered : itemsMeta) {
+                discoveredPaths.add(discovered.getPath());
+                FileMeta existing = existingByPath.get(discovered.getPath());
+                FileMeta row;
+                if (existing != null) {
+                    existing.setIsSearchBook(discovered.getIsSearchBook());
+                    if (ExtUtils.isExteralSD(discovered.getPath())) {
+                        if (discovered.getSize() != null) existing.setSize(discovered.getSize());
+                        if (discovered.getDate() != null) existing.setDate(discovered.getDate());
+                        if (TxtUtils.isNotEmpty(discovered.getPathTxt())) existing.setPathTxt(discovered.getPathTxt());
+                    }
+                    row = existing;
+                } else {
+                    row = discovered;
+                }
+                merged.add(row);
+                if (needsFullUpdate(row, existing)) {
+                    toProcess.add(row);
+                }
+            }
+
+            // Books previously in the search set that no longer exist: soft-delete (keep row for
+            // user state, drop the search-visible flag).
+            List<FileMeta> toMarkRemoved = new ArrayList<>();
+            for (Map.Entry<String, FileMeta> e : existingByPath.entrySet()) {
+                if (!discoveredPaths.contains(e.getKey())
+                        && Boolean.TRUE.equals(e.getValue().getIsSearchBook())) {
+                    e.getValue().setIsSearchBook(false);
+                    toMarkRemoved.add(e.getValue());
+                }
+            }
+
+            itemsMeta = merged;
+
+            AppDB.get().saveAll(merged);
+            if (!toMarkRemoved.isEmpty()) {
+                AppDB.get().updateAll(toMarkRemoved);
+            }
 
             handler.removeCallbacks(timer);
 
@@ -205,35 +254,40 @@ public class SearchAllBooksWorker extends MessageWorker {
 
             handler.post(refreshTimer);
 
-            for (FileMeta meta : itemsMeta) {
+            LOG.d("SearchAllBooksWorker", "incremental toProcess=", toProcess.size(),
+                    "of total=", merged.size(), "removed=", toMarkRemoved.size());
+
+            // Metadata extraction in parallel. Each per-book task is independent aside from a
+            // ReentrantLock inside CacheZipUtils that serializes actual .zip/.okular unpacks;
+            // PDF/EPUB/MOBI/FB2/DJVU extractors don't hit that lock.
+            int threads = Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors()));
+            executor = Executors.newFixedThreadPool(threads);
+
+            List<Future<?>> futures = new ArrayList<>(toProcess.size());
+            for (final FileMeta meta : toProcess) {
+                futures.add(executor.submit(new Runnable() {
+                    @Override public void run() {
+                        if (isStopped()) return;
+                        try {
+                            extractMetaForBook(meta);
+                        } catch (Throwable t) {
+                            LOG.e(t);
+                        }
+                    }
+                }));
+            }
+            for (Future<?> f : futures) {
                 if (isStopped()) {
+                    executor.shutdownNow();
                     return false;
                 }
-                if (ExtUtils.isExteralSD(meta.getPath())) continue;
-                File file = new File(meta.getPath());
-                FileMetaCore.get().upadteBasicMeta(meta, file);
+                try { f.get(); } catch (Exception e) { LOG.e(e); }
             }
 
-            AppDB.get().updateAll(itemsMeta);
-            sendFinishMessage();
-
-
-            for (FileMeta meta : itemsMeta) {
-                if (isStopped()) {
-                    return false;
-                }
-                if (ExtUtils.isExteralSD(meta.getPath())) {
-                    extractSAFMeta(meta);
-                } else {
-                    //if(FileMetaCore.isSafeToExtactBook(meta.getPath())) {
-                    EbookMeta ebookMeta = FileMetaCore.get().getEbookMeta(meta.getPath(), CacheZipUtils.CacheDir.ZipService, true);
-                    FileMetaCore.get().udpateFullMeta(meta, ebookMeta);
-                    //}
-                }
+            SharedBooks.updateProgress(toProcess, true, -1);
+            if (!toProcess.isEmpty()) {
+                AppDB.get().updateAll(toProcess);
             }
-
-            SharedBooks.updateProgress(itemsMeta, true, -1);
-            AppDB.get().updateAll(itemsMeta);
 
 
             itemsMeta.clear();
@@ -270,12 +324,44 @@ public class SearchAllBooksWorker extends MessageWorker {
             }
             updateBookAnnotations();
         } finally {
+            if (executor != null) executor.shutdownNow();
             Prefs.get().remove(errorID, 0);
             handler.removeCallbacksAndMessages(null);
         }
         return true;
 
 
+    }
+
+    private void extractMetaForBook(FileMeta meta) {
+        if (ExtUtils.isExteralSD(meta.getPath())) {
+            // Basic size/date/pathTxt already came from the SAF listing at discovery time.
+            extractSAFMeta(meta);
+        } else {
+            File file = new File(meta.getPath());
+            FileMetaCore.get().upadteBasicMeta(meta, file);
+            EbookMeta ebookMeta = FileMetaCore.get()
+                    .getEbookMeta(meta.getPath(), CacheZipUtils.CacheDir.ZipService, true);
+            FileMetaCore.get().udpateFullMeta(meta, ebookMeta);
+        }
+    }
+
+    private boolean needsFullUpdate(FileMeta row, FileMeta existing) {
+        if (existing == null) return true;
+        Integer state = existing.getState();
+        if (state == null || state != FileMetaCore.STATE_FULL) return true;
+        Long storedSize = existing.getSize();
+        Long storedDate = existing.getDate();
+        if (storedSize == null || storedDate == null) return true;
+        if (ExtUtils.isExteralSD(row.getPath())) {
+            Long discSize = row.getSize();
+            Long discDate = row.getDate();
+            if (discSize != null && !discSize.equals(storedSize)) return true;
+            if (discDate != null && !discDate.equals(storedDate)) return true;
+            return false;
+        }
+        File f = new File(row.getPath());
+        return f.lastModified() != storedDate || f.length() != storedSize;
     }
 
     private void extractSAFMeta(FileMeta fileMeta) {
@@ -296,7 +382,8 @@ public class SearchAllBooksWorker extends MessageWorker {
             pfd = getApplicationContext().getContentResolver().openFileDescriptor(uri, "r");
             if (pfd == null) return;
 
-            linkFile = new File(getApplicationContext().getCacheDir(), "saf_meta_" + displayName);
+            long uniq = safLinkCounter.incrementAndGet();
+            linkFile = new File(getApplicationContext().getCacheDir(), "saf_meta_" + uniq + "_" + displayName);
             linkFile.delete();
             Os.symlink("/proc/self/fd/" + pfd.getFd(), linkFile.getAbsolutePath());
 
@@ -394,7 +481,6 @@ public class SearchAllBooksWorker extends MessageWorker {
                     meta.setTitle(child.name);
                     meta.setPathTxt(child.name);
                     meta.setExt(ExtUtils.getFileExtension(child.name));
-                    meta.setState(FileMetaCore.STATE_FULL);
                     try {
                         if (child.sizeStr != null) meta.setSize(Long.parseLong(child.sizeStr));
                         if (child.modifiedStr != null) meta.setDate(Long.parseLong(child.modifiedStr));
