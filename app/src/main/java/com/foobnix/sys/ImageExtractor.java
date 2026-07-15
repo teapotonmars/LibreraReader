@@ -82,11 +82,14 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import mobi.librera.smartreflow.AndroidPlatformImage;
 import mobi.librera.smartreflow.SmartReflow1;
 
 public class ImageExtractor {
+    private static final Set<String> activeExtractions = ConcurrentHashMap.newKeySet();
 
     public static final int COVER_PAGE_WITH_EFFECT = -3;
     public static final int COVER_PAGE_NO_EFFECT = -2;
@@ -722,15 +725,25 @@ public class ImageExtractor {
         final String hash = "" + imageUri.hashCode();
         try {
             final InputStream streamInner;
+            while (sp.contains(hash) && activeExtractions.contains(hash)) {
+                try {
+                    Thread.sleep(25);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException(e);
+                }
+            }
             if (sp.contains(hash)) {
                 LOG.d("Error-crash", imageUri, hash);
                 return messageFile("#crash", "");
             }
             try {
+                activeExtractions.add(hash);
                 sp.edit().putBoolean(hash, true).commit();
                 streamInner = getStreamInner(imageUri, hash);
             } finally {
                 sp.edit().remove(hash).commit();
+                activeExtractions.remove(hash);
             }
             return streamInner;
         } finally {

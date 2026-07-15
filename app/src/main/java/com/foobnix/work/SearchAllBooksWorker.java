@@ -59,6 +59,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.Future;
@@ -249,7 +250,7 @@ public class SearchAllBooksWorker extends MessageWorker {
 
             handler.removeCallbacks(timer);
 
-            sendFinishMessage();
+            sendLibraryUpdated();
 
             handler.post(refreshTimer);
 
@@ -264,25 +265,30 @@ public class SearchAllBooksWorker extends MessageWorker {
             LOG.d("Metadata extraction parallelism", threads);
             executor = Executors.newFixedThreadPool(threads);
 
-            List<Future<?>> futures = new ArrayList<>(toProcess.size());
+            ExecutorCompletionService<FileMeta> completions = new ExecutorCompletionService<>(executor);
             for (final FileMeta meta : toProcess) {
-                futures.add(executor.submit(new Runnable() {
-                    @Override public void run() {
-                        if (isStopped()) return;
+                completions.submit(() -> {
+                        if (isStopped()) return meta;
                         try {
                             extractMetaForBook(meta);
                         } catch (Throwable t) {
                             LOG.e(t);
                         }
-                    }
-                }));
+                        return meta;
+                });
             }
-            for (Future<?> f : futures) {
+            for (int i = 0; i < toProcess.size(); i++) {
                 if (isStopped()) {
                     executor.shutdownNow();
                     return false;
                 }
-                try { f.get(); } catch (Exception e) { LOG.e(e); }
+                try {
+                    FileMeta completed = completions.take().get();
+                    AppDB.get().update(completed);
+                    sendMetadataUpdated(Collections.singletonList(completed.getPath()));
+                } catch (Exception e) {
+                    LOG.e(e);
+                }
             }
 
             SharedBooks.updateProgress(toProcess, true, -1);
@@ -408,8 +414,8 @@ public class SearchAllBooksWorker extends MessageWorker {
         ContentResolver cr = getApplicationContext().getContentResolver();
         try (InputStream in = cr.openInputStream(entry.opfUri)) {
             if (in == null) return false;
-            EbookMeta ebookMeta = CalirbeExtractor.getBookMetaInformationFromStream(
-                    in, SafOpfRegistry.coverResolver(cr, entry.siblingByLowerName));
+            // Publish the inexpensive XML metadata without waiting for a separate SAF cover read.
+            EbookMeta ebookMeta = CalirbeExtractor.getBookMetaInformationFromStream(in, null);
             if (ebookMeta == null) return false;
             ebookMeta.setUnzipPath(fileMeta.getPath());
             FileMetaCore.get().udpateFullMeta(fileMeta, ebookMeta);

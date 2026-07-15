@@ -18,6 +18,7 @@ import org.greenrobot.eventbus.EventBus;
 
 import java.io.IOException;
 import java.util.Collection;
+import java.util.ArrayList;
 
 abstract class MessageWorker extends Worker {
 
@@ -101,6 +102,19 @@ abstract class MessageWorker extends Worker {
                 new Intent(BooksService.INTENT_NAME).putExtra(Intent.EXTRA_TEXT, BooksService.RESULT_BUILD_LIBRARY);
         LocalBroadcastManager.getInstance(getApplicationContext())
                              .sendBroadcast(itent);
+    }
+
+    protected void sendLibraryUpdated() {
+        Intent intent = new Intent(BooksService.INTENT_NAME)
+                .putExtra(Intent.EXTRA_TEXT, BooksService.RESULT_LIBRARY_UPDATED);
+        LocalBroadcastManager.getInstance(getApplicationContext()).sendBroadcast(intent);
+    }
+
+    protected void sendMetadataUpdated(Collection<String> paths) {
+        Intent intent = new Intent(BooksService.INTENT_NAME)
+                .putExtra(Intent.EXTRA_TEXT, BooksService.RESULT_METADATA_UPDATED)
+                .putStringArrayListExtra("PATHS", new ArrayList<>(paths));
+        LocalBroadcastManager.getInstance(getApplicationContext()).sendBroadcast(intent);
     }
 
 }

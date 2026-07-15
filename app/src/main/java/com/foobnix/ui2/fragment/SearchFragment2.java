@@ -126,6 +126,7 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
     View onRefresh, secondTopPanel, layoutError;
     AutoCompleteTextView searchEditText;
     int countTitles = 0;
+    boolean isExtractingLibrary = false;
     Runnable hideKeyboard = new Runnable() {
 
         @Override public void run() {
@@ -158,6 +159,7 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
         @Override public void onReceive(Context context, Intent intent) {
 
             if (BooksService.RESULT_SEARCH_FINISH.equals(intent.getStringExtra(Intent.EXTRA_TEXT))) {
+                isExtractingLibrary = false;
                 searchAndOrderAsync();
                 setSearchHint(R.string.library);
                 onRefresh.setActivated(true);
@@ -174,8 +176,15 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
                 setSearchHint(R.string.searching_please_wait_);
                 onRefresh.setActivated(false);
             } else if (BooksService.RESULT_BUILD_LIBRARY.equals(intent.getStringExtra(Intent.EXTRA_TEXT))) {
+                isExtractingLibrary = true;
                 onRefresh.setActivated(false);
                 setSearchHint(R.string.extracting_information_from_books);
+            } else if (BooksService.RESULT_LIBRARY_UPDATED.equals(intent.getStringExtra(Intent.EXTRA_TEXT))) {
+                isExtractingLibrary = true;
+                searchAndOrderAsync();
+            } else if (BooksService.RESULT_METADATA_UPDATED.equals(intent.getStringExtra(Intent.EXTRA_TEXT))) {
+                ArrayList<String> paths = intent.getStringArrayListExtra("PATHS");
+                updateMetadataRows(paths);
             } else if (BooksService.RESULT_SEARCH_MESSAGE_TXT.equals(intent.getStringExtra(Intent.EXTRA_TEXT))) {
                 setSearchHint(intent.getStringExtra("TEXT"));
             } else if (BooksService.RESULT_NOTIFY_ALL.equals(intent.getStringExtra(Intent.EXTRA_TEXT))) {
@@ -763,6 +772,24 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
 
     }
 
+    private void updateMetadataRows(List<String> paths) {
+        if (paths == null || paths.isEmpty() || searchAdapter == null) return;
+        Set<String> changed = new HashSet<>(paths);
+        List<FileMeta> displayed = searchAdapter.getItemsList();
+        // The worker updates different entity instances on a background thread. GreenDAO's
+        // identity scope can otherwise hand the UI its already-bound, stale instance again.
+        AppDB.get().getDao().detachAll();
+        for (int i = 0; i < displayed.size(); i++) {
+            FileMeta old = displayed.get(i);
+            if (old == null || !changed.contains(old.getPath())) continue;
+            FileMeta updated = AppDB.get().load(old.getPath());
+            if (updated != null) {
+                displayed.set(i, updated);
+                searchAdapter.notifyItemChanged(i);
+            }
+        }
+    }
+
     @Subscribe public void onShowTag(OpenTagMessage msg) {
         if (searchEditText != null) {
             searchEditText.setText("@tags " + msg.getTagName());
@@ -921,7 +948,7 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
         String txt = searchEditText.getText()
                                    .toString()
                                    .trim();
-        setSearchHint(R.string.library);
+        setSearchHint(isExtractingLibrary ? R.string.extracting_information_from_books : R.string.library);
 
         //if(AppsConfig.IS_LOG){
         //setSearchHint(Apps.getApplicationName(getContext()));

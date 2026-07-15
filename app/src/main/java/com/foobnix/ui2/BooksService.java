@@ -14,6 +14,8 @@ public class BooksService {
     public static String RESULT_SYNC_FINISH = "RESULT_SYNC_FINISH";
     public static String RESULT_SEARCH_FINISH = "RESULT_SEARCH_FINISH";
     public static String RESULT_BUILD_LIBRARY = "RESULT_BUILD_LIBRARY";
+    public static String RESULT_LIBRARY_UPDATED = "RESULT_LIBRARY_UPDATED";
+    public static String RESULT_METADATA_UPDATED = "RESULT_METADATA_UPDATED";
     public static String RESULT_SEARCH_COUNT = "RESULT_SEARCH_COUNT";
     public static String RESULT_NOTIFY_ALL = "RESULT_NOTIFY_ALL";
 
