@@ -50,6 +50,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -57,7 +58,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
@@ -97,7 +97,9 @@ public class SearchAllBooksWorker extends MessageWorker {
         ExecutorService executor = null;
         try {
             Tags2.migration();
-            itemsMeta = new LinkedList<FileMeta>();
+            // Synchronized because SafSearchTask (fork-join) writes to it from worker
+            // threads in parallel with the timer reading its size for progress display.
+            itemsMeta = Collections.synchronizedList(new LinkedList<FileMeta>());
 
             AppProfile.init(getApplicationContext());
 
@@ -442,26 +444,26 @@ public class SearchAllBooksWorker extends MessageWorker {
         // SAF folder listings are network round-trips. Fan out with fork-join so subdirectory
         // queries run in parallel (fork-join avoids the classic thread-starvation deadlock
         // that a fixed pool would hit when every worker is waiting on its children).
-        ConcurrentLinkedQueue<FileMeta> found = new ConcurrentLinkedQueue<>();
+        // Books are written directly into items (must be a thread-safe list) so the
+        // discovery timer sees the count grow live rather than jumping at the end.
         int parallelism = Math.max(1, Tunables.SAF_DISCOVERY_PARALLELISM);
         LOG.d("SAF discovery parallelism", parallelism);
         ForkJoinPool pool = new ForkJoinPool(parallelism);
         try {
-            pool.invoke(new SafSearchTask(context, rootUri, found));
+            pool.invoke(new SafSearchTask(context, rootUri, items));
         } catch (Exception e) {
             LOG.e(e);
         } finally {
             pool.shutdown();
         }
-        items.addAll(found);
     }
 
     private final class SafSearchTask extends RecursiveAction {
         private final Context context;
         private final Uri parentUri;
-        private final ConcurrentLinkedQueue<FileMeta> found;
+        private final List<FileMeta> found;
 
-        SafSearchTask(Context context, Uri parentUri, ConcurrentLinkedQueue<FileMeta> found) {
+        SafSearchTask(Context context, Uri parentUri, List<FileMeta> found) {
             this.context = context;
             this.parentUri = parentUri;
             this.found = found;
