@@ -703,12 +703,11 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
     private void seachAll() {
         try {
             LOG.d("SeachFragment2", "seachAll");
-            searchAdapter.clearItems();
-            searchAdapter.notifyDataSetChanged();
-            IMG.clearMemoryCache();
-            IMG.clearDiscCache();
-            //BooksService.startForeground(getActivity(), BooksService.ACTION_SEARCH_ALL);
-
+            // Incremental indexing preserves the DB, so leave the current UI in place while
+            // the worker runs. It will send RESULT_SEARCH_FINISH when done, which triggers
+            // searchAndOrderAsync() and an in-place reload from the DB. IMG caches also stay
+            // valid so unchanged books' covers keep hitting Glide's disk cache instead of
+            // being re-extracted from scratch.
             SearchAllBooksWorker.run(getActivity());
 
         } catch (Exception e) {

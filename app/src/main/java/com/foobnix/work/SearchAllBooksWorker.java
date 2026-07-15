@@ -20,7 +20,6 @@ import androidx.work.WorkerParameters;
 
 import com.foobnix.android.utils.JsonDB;
 import com.foobnix.android.utils.LOG;
-import com.foobnix.android.utils.StringDB;
 import com.foobnix.android.utils.TxtUtils;
 import com.foobnix.dao2.FileMeta;
 import com.foobnix.ext.CacheZipUtils;
@@ -133,16 +132,6 @@ public class SearchAllBooksWorker extends MessageWorker {
                 }
             }
 
-            for (final String safPath : StringDB.asList(BookCSS.get().pathSAF)) {
-                if (TxtUtils.isEmpty(safPath)) {
-                    continue;
-                }
-                LOG.d("SAF Search in: " + safPath);
-                searchSAF(getApplicationContext(), Uri.parse(safPath), itemsMeta);
-                if (isStopped()) {
-                    return false;
-                }
-            }
             if (itemsMeta.isEmpty()) {
                 File downloadsDir = AppSP.get().getTempDownloadBooks(getApplicationContext());
                 downloadsDir.mkdirs();
