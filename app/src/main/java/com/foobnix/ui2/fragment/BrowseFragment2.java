@@ -951,7 +951,7 @@ import java.util.Map;
                 return result;
             }
 
-            if (ExtUtils.isExteralSD(getInitPath())) {
+            if (ExtUtils.isExteralSD(AppState.get().displayPath)) {
 
                 List<FileMeta> items = new ArrayList<FileMeta>();
 
