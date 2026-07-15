@@ -38,6 +38,7 @@ import com.foobnix.pdf.info.ExtUtils;
 import com.foobnix.pdf.info.IMG;
 import com.foobnix.pdf.info.Prefs;
 import com.foobnix.pdf.info.SafOpfRegistry;
+import com.foobnix.pdf.info.Tunables;
 import com.foobnix.pdf.info.io.SearchCore;
 import com.foobnix.pdf.info.model.BookCSS;
 import com.foobnix.sys.ImageExtractor;
@@ -57,9 +58,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.Future;
+import java.util.concurrent.RecursiveAction;
 import java.util.concurrent.atomic.AtomicLong;
 
 
@@ -263,8 +267,10 @@ public class SearchAllBooksWorker extends MessageWorker {
 
             // Metadata extraction in parallel. Each per-book task is independent aside from a
             // ReentrantLock inside CacheZipUtils that serializes actual .zip/.okular unpacks;
-            // PDF/EPUB/MOBI/FB2/DJVU extractors don't hit that lock.
-            int threads = Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors()));
+            // PDF/EPUB/MOBI/FB2/DJVU extractors don't hit that lock. Kept small so SAF
+            // extractions don't hammer the remote provider.
+            int threads = Math.max(1, Tunables.METADATA_EXTRACTION_PARALLELISM);
+            LOG.d("Metadata extraction parallelism", threads);
             executor = Executors.newFixedThreadPool(threads);
 
             List<Future<?>> futures = new ArrayList<>(toProcess.size());
@@ -443,65 +449,99 @@ public class SearchAllBooksWorker extends MessageWorker {
         }
     }
 
-    private void searchSAF(Context context, Uri parentUri, List<FileMeta> items) {
+    private void searchSAF(Context context, Uri rootUri, List<FileMeta> items) {
+        // SAF folder listings are network round-trips. Fan out with fork-join so subdirectory
+        // queries run in parallel (fork-join avoids the classic thread-starvation deadlock
+        // that a fixed pool would hit when every worker is waiting on its children).
+        ConcurrentLinkedQueue<FileMeta> found = new ConcurrentLinkedQueue<>();
+        int parallelism = Math.max(1, Tunables.SAF_DISCOVERY_PARALLELISM);
+        LOG.d("SAF discovery parallelism", parallelism);
+        ForkJoinPool pool = new ForkJoinPool(parallelism);
         try {
-            ContentResolver cr = context.getContentResolver();
-            Uri childrenUri = ExtUtils.getChildUri(context, parentUri);
-            if (childrenUri == null) return;
-
-            List<SafChild> children = new LinkedList<>();
-            Map<String, Uri> siblingByLowerName = new HashMap<>();
-
-            Cursor cursor = cr.query(childrenUri, new String[]{
-                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                    DocumentsContract.Document.COLUMN_MIME_TYPE,
-                    DocumentsContract.Document.COLUMN_SIZE,
-                    DocumentsContract.Document.COLUMN_LAST_MODIFIED,
-            }, null, null, null);
-            try {
-                while (cursor != null && cursor.moveToNext()) {
-                    String name = cursor.getString(0);
-                    String docId = cursor.getString(1);
-                    String mimeType = cursor.getString(2);
-                    String sizeStr = cursor.getString(3);
-                    String modifiedStr = cursor.getString(4);
-
-                    Uri docUri = DocumentsContract.buildDocumentUriUsingTree(parentUri, docId);
-                    children.add(new SafChild(name, docUri, mimeType, sizeStr, modifiedStr));
-                    if (name != null && !DocumentsContract.Document.MIME_TYPE_DIR.equals(mimeType)) {
-                        siblingByLowerName.put(name.toLowerCase(Locale.US), docUri);
-                    }
-                }
-            } finally {
-                if (cursor != null) cursor.close();
-            }
-
-            for (SafChild child : children) {
-                if (DocumentsContract.Document.MIME_TYPE_DIR.equals(child.mimeType)) {
-                    searchSAF(context, child.uri, items);
-                } else if (SearchCore.endWith(child.name, ExtUtils.seachExts)) {
-                    FileMeta meta = new FileMeta(child.uri.toString());
-                    meta.setTitle(child.name);
-                    meta.setPathTxt(child.name);
-                    meta.setExt(ExtUtils.getFileExtension(child.name));
-                    try {
-                        if (child.sizeStr != null) meta.setSize(Long.parseLong(child.sizeStr));
-                        if (child.modifiedStr != null) meta.setDate(Long.parseLong(child.modifiedStr));
-                    } catch (NumberFormatException ignored) {}
-                    items.add(meta);
-
-                    Uri opfUri = findCalibreOpf(child.name, siblingByLowerName);
-                    if (opfUri != null) {
-                        SafOpfRegistry.register(child.uri.toString(),
-                                new SafOpfRegistry.Entry(opfUri, siblingByLowerName));
-                        LOG.d("SAF Calibre OPF for", child.name, opfUri);
-                    }
-                    LOG.d("SAF Search found:", child.name, child.uri.toString());
-                }
-            }
+            pool.invoke(new SafSearchTask(context, rootUri, found));
         } catch (Exception e) {
             LOG.e(e);
+        } finally {
+            pool.shutdown();
+        }
+        items.addAll(found);
+    }
+
+    private final class SafSearchTask extends RecursiveAction {
+        private final Context context;
+        private final Uri parentUri;
+        private final ConcurrentLinkedQueue<FileMeta> found;
+
+        SafSearchTask(Context context, Uri parentUri, ConcurrentLinkedQueue<FileMeta> found) {
+            this.context = context;
+            this.parentUri = parentUri;
+            this.found = found;
+        }
+
+        @Override
+        protected void compute() {
+            if (isStopped()) return;
+            try {
+                ContentResolver cr = context.getContentResolver();
+                Uri childrenUri = ExtUtils.getChildUri(context, parentUri);
+                if (childrenUri == null) return;
+
+                List<SafChild> children = new ArrayList<>();
+                Map<String, Uri> siblingByLowerName = new HashMap<>();
+
+                Cursor cursor = cr.query(childrenUri, new String[]{
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE,
+                        DocumentsContract.Document.COLUMN_SIZE,
+                        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+                }, null, null, null);
+                try {
+                    while (cursor != null && cursor.moveToNext()) {
+                        String name = cursor.getString(0);
+                        String docId = cursor.getString(1);
+                        String mimeType = cursor.getString(2);
+                        String sizeStr = cursor.getString(3);
+                        String modifiedStr = cursor.getString(4);
+
+                        Uri docUri = DocumentsContract.buildDocumentUriUsingTree(parentUri, docId);
+                        children.add(new SafChild(name, docUri, mimeType, sizeStr, modifiedStr));
+                        if (name != null && !DocumentsContract.Document.MIME_TYPE_DIR.equals(mimeType)) {
+                            siblingByLowerName.put(name.toLowerCase(Locale.US), docUri);
+                        }
+                    }
+                } finally {
+                    if (cursor != null) cursor.close();
+                }
+
+                List<SafSearchTask> subtasks = new ArrayList<>();
+                for (SafChild child : children) {
+                    if (DocumentsContract.Document.MIME_TYPE_DIR.equals(child.mimeType)) {
+                        subtasks.add(new SafSearchTask(context, child.uri, found));
+                    } else if (SearchCore.endWith(child.name, ExtUtils.seachExts)) {
+                        FileMeta meta = new FileMeta(child.uri.toString());
+                        meta.setTitle(child.name);
+                        meta.setPathTxt(child.name);
+                        meta.setExt(ExtUtils.getFileExtension(child.name));
+                        try {
+                            if (child.sizeStr != null) meta.setSize(Long.parseLong(child.sizeStr));
+                            if (child.modifiedStr != null) meta.setDate(Long.parseLong(child.modifiedStr));
+                        } catch (NumberFormatException ignored) {}
+                        found.add(meta);
+
+                        Uri opfUri = findCalibreOpf(child.name, siblingByLowerName);
+                        if (opfUri != null) {
+                            SafOpfRegistry.register(child.uri.toString(),
+                                    new SafOpfRegistry.Entry(opfUri, siblingByLowerName));
+                        }
+                    }
+                }
+                if (!subtasks.isEmpty()) {
+                    invokeAll(subtasks);
+                }
+            } catch (Exception e) {
+                LOG.e(e);
+            }
         }
     }
 

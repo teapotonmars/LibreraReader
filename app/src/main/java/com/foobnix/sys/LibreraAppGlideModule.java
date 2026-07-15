@@ -191,7 +191,7 @@ public class LibreraAppGlideModule extends AppGlideModule {
 //        builder.setDiskCache(new DiskLruCacheFactory(f.getPath(), diskCacheSizeBytes));
 
 
-        int coverThreads = Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors()));
+        int coverThreads = Math.max(1, com.foobnix.pdf.info.Tunables.COVER_EXTRACTION_PARALLELISM);
         builder.setSourceExecutor(
                 newSourceBuilder()
 
