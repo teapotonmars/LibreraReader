@@ -9,6 +9,7 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
@@ -16,9 +17,8 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.ParcelFileDescriptor;
-import android.system.Os;
 import android.provider.DocumentsContract;
+import android.provider.OpenableColumns;
 import android.text.format.DateFormat;
 import android.text.format.Formatter;
 import android.util.Base64;
@@ -80,6 +80,7 @@ import org.ebookdroid.BookType;
 import org.ebookdroid.core.codec.CodecDocument;
 import org.ebookdroid.core.codec.CodecPage;
 import org.ebookdroid.core.codec.OutlineLink;
+import org.ebookdroid.droids.EpubContext;
 import org.ebookdroid.ui.viewer.VerticalViewActivity;
 import org.mozilla.universalchardet.UniversalDetector;
 
@@ -89,8 +90,11 @@ import java.io.File;
 import java.io.FileFilter;
 import java.io.FileOutputStream;
 import java.io.FileWriter;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -120,14 +124,13 @@ public class ExtUtils {
     public static Map<String, String> mimeCache = new HashMap<String, String>();
     public static List<String> seachExts = new ArrayList<String>();
 
-    private static volatile ParcelFileDescriptor safPfd = null;
+    private static final String SAF_OPEN_CACHE_DIR = "saf-open";
+    private static final long SAF_OPEN_CACHE_MAX_BYTES = 512L * 1024 * 1024;
     public static volatile String pendingSAFUri = null;
 
     public static void closeSafPfd() {
-        if (safPfd != null) {
-            try { safPfd.close(); } catch (Exception ignore) {}
-            safPfd = null;
-        }
+        // SAF books are staged into the local cache before opening, so there is no
+        // provider file descriptor that needs to remain open for the reader lifetime.
     }
 
     public static String recentPathFromIntent(android.content.Intent intent, String localPath) {
@@ -337,25 +340,15 @@ public class ExtUtils {
             final Uri uri = Uri.parse(meta.getPath());
             final String displayName = (meta.getPathTxt() != null && !meta.getPathTxt().isEmpty())
                     ? meta.getPathTxt() : meta.getTitle();
+            if (BookType.EPUB.is(displayName) && EpubContext.isProcessingEnabled()) {
+                EpubContext.prepareProcessingLanguage(meta.getLang());
+            }
             final String originalSafUri = meta.getPath();
             final Handler mainHandler = new Handler(Looper.getMainLooper());
             new Thread(() -> {
                 try {
-                    if (safPfd != null) {
-                        try { safPfd.close(); } catch (Exception ignore) {}
-                        safPfd = null;
-                    }
-                    ParcelFileDescriptor pfd = a.getContentResolver().openFileDescriptor(uri, "r");
-                    if (pfd == null) {
-                        mainHandler.post(() -> Toast.makeText(a, R.string.incorrect_value, Toast.LENGTH_SHORT).show());
-                        return;
-                    }
-                    safPfd = pfd;
-                    File linkFile = new File(a.getCacheDir(), "saf_current_" + displayName);
-                    linkFile.delete();
-                    Os.symlink("/proc/self/fd/" + pfd.getFd(), linkFile.getAbsolutePath());
-                    LOG.d("openFile SAF symlink", linkFile.getPath(), "fd=" + pfd.getFd());
-                    mainHandler.post(() -> openLocalFile(a, linkFile, originalSafUri));
+                    File cachedFile = stageSafFile(a, uri, displayName, meta.getSize(), meta.getDate());
+                    mainHandler.post(() -> openLocalFile(a, cachedFile, originalSafUri));
                 } catch (Exception e) {
                     LOG.e(e);
                     mainHandler.post(() -> Toast.makeText(a, R.string.incorrect_value, Toast.LENGTH_SHORT).show());
@@ -365,6 +358,136 @@ public class ExtUtils {
         }
 
         openLocalFile(a, new File(meta.getPath()), null);
+    }
+
+    private static File stageSafFile(Context context, Uri uri, String fallbackName,
+                                     Long fallbackSize, Long fallbackModified) throws Exception {
+        ContentResolver resolver = context.getContentResolver();
+        String displayName = fallbackName;
+        long size = fallbackSize != null ? fallbackSize : -1;
+        long modified = fallbackModified != null ? fallbackModified : -1;
+
+        String[] projection = {
+                OpenableColumns.DISPLAY_NAME,
+                OpenableColumns.SIZE,
+                DocumentsContract.Document.COLUMN_LAST_MODIFIED
+        };
+        try (Cursor cursor = resolver.query(uri, projection, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                int sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE);
+                int modifiedIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED);
+                if (nameIndex >= 0 && !cursor.isNull(nameIndex)) displayName = cursor.getString(nameIndex);
+                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) size = cursor.getLong(sizeIndex);
+                if (modifiedIndex >= 0 && !cursor.isNull(modifiedIndex)) modified = cursor.getLong(modifiedIndex);
+            }
+        } catch (Exception e) {
+            LOG.e(e);
+        }
+
+        String key = safCacheKey(uri.toString());
+        String extension = extensionFromName(displayName);
+        String suffix = TxtUtils.isEmpty(extension) ? "" : "." + extension.toLowerCase(Locale.US);
+        File cacheDir = new File(context.getCacheDir(), SAF_OPEN_CACHE_DIR);
+        if (!cacheDir.isDirectory() && !cacheDir.mkdirs()) {
+            throw new IOException("Cannot create SAF open cache");
+        }
+        removeLegacySafCacheFiles(cacheDir);
+        boolean cacheProcessedEpub = BookType.EPUB.is(displayName) && EpubContext.isProcessingEnabled();
+        final File processedFile;
+        if (cacheProcessedEpub) {
+            String settingsSnapshot = EpubContext.processingSettingsKey();
+            String settingsKey = safCacheKey(settingsSnapshot);
+            processedFile = new File(cacheDir, "processed-" + key + "-" + size + "-" + modified
+                    + "-" + settingsKey + ".epub");
+            if (processedFile.isFile()) {
+                pruneSafOpenCache(cacheDir, processedFile);
+                LOG.d("openFile SAF processed cache hit", processedFile.getPath());
+                return processedFile;
+            }
+        } else {
+            processedFile = null;
+        }
+
+        File cachedFile = new File(cacheDir, "source-" + key + "-" + size + "-" + modified + suffix);
+        if (cachedFile.isFile() && (size < 0 || cachedFile.length() == size)) {
+            pruneSafOpenCache(cacheDir, cachedFile);
+            LOG.d("openFile SAF cache hit", cachedFile.getPath());
+            if (processedFile != null) EpubContext.registerSafProcessing(cachedFile, processedFile);
+            return cachedFile;
+        }
+
+        File tempFile = new File(cacheDir, "source-" + key + ".part");
+        tempFile.delete();
+        try (InputStream input = resolver.openInputStream(uri);
+             FileOutputStream output = new FileOutputStream(tempFile)) {
+            if (input == null) throw new IOException("Cannot open SAF file");
+            byte[] buffer = new byte[128 * 1024];
+            int count;
+            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            output.getFD().sync();
+        } catch (Exception e) {
+            tempFile.delete();
+            throw e;
+        }
+        if (size >= 0 && tempFile.length() != size) {
+            tempFile.delete();
+            throw new IOException("Incomplete SAF file: expected " + size + ", copied " + tempFile.length());
+        }
+        if (!tempFile.renameTo(cachedFile)) {
+            tempFile.delete();
+            throw new IOException("Cannot publish SAF cache file");
+        }
+        File[] oldVersions = cacheDir.listFiles((dir, name) -> (name.startsWith("source-" + key + "-")
+                || name.startsWith("processed-" + key + "-")) && !name.equals(cachedFile.getName())
+                && (processedFile == null || !name.equals(processedFile.getName())));
+        if (oldVersions != null) for (File oldVersion : oldVersions) oldVersion.delete();
+        pruneSafOpenCache(cacheDir, cachedFile);
+        LOG.d("openFile SAF cached", cachedFile.getPath(), cachedFile.length());
+        if (processedFile != null) EpubContext.registerSafProcessing(cachedFile, processedFile);
+        return cachedFile;
+    }
+
+    public static void publishSafProcessed(File sourceFile, File tempFile, File processedFile) throws IOException {
+        if (!tempFile.isFile() || tempFile.length() == 0) {
+            tempFile.delete();
+            throw new IOException("SAF EPUB processing produced no output");
+        }
+        processedFile.delete();
+        if (!tempFile.renameTo(processedFile)) {
+            tempFile.delete();
+            throw new IOException("Cannot publish processed SAF EPUB");
+        }
+        sourceFile.delete();
+        pruneSafOpenCache(processedFile.getParentFile(), processedFile);
+    }
+
+    private static void removeLegacySafCacheFiles(File cacheDir) {
+        File[] legacyFiles = cacheDir.listFiles(file -> file.isFile()
+                && !file.getName().startsWith("source-")
+                && !file.getName().startsWith("processed-"));
+        if (legacyFiles != null) for (File legacyFile : legacyFiles) legacyFile.delete();
+    }
+
+    private static void pruneSafOpenCache(File cacheDir, File protectedFile) {
+        File[] files = cacheDir.listFiles(file -> file.isFile() && !file.getName().endsWith(".part"));
+        if (files == null) return;
+        long total = 0;
+        for (File file : files) total += file.length();
+        Arrays.sort(files, (left, right) -> Long.compare(left.lastModified(), right.lastModified()));
+        for (File file : files) {
+            if (total <= SAF_OPEN_CACHE_MAX_BYTES) break;
+            if (file.equals(protectedFile)) continue;
+            long length = file.length();
+            if (file.delete()) total -= length;
+        }
+    }
+
+    private static String safCacheKey(String uri) throws Exception {
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(uri.getBytes(StandardCharsets.UTF_8));
+        StringBuilder result = new StringBuilder(32);
+        for (int i = 0; i < 16; i++) result.append(String.format(Locale.US, "%02x", digest[i] & 0xff));
+        return result.toString();
     }
 
     private static void openLocalFile(Activity a, File file, String safUri) {
