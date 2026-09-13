@@ -8,8 +8,8 @@ package com.foobnix.pdf.info;
 public final class Tunables {
     private Tunables() {}
 
-    /** ForkJoinPool parallelism used by SearchAllBooksWorker.searchSAF for folder discovery. */
-    public static final int SAF_DISCOVERY_PARALLELISM = 2;
+    /** Six concurrent listings overlap remote refresh latency in nested Calibre libraries. */
+    public static final int SAF_DISCOVERY_PARALLELISM = 6;
 
     /** Fixed pool size for SearchAllBooksWorker's per-book metadata extraction pass. */
     public static final int METADATA_EXTRACTION_PARALLELISM = 2;

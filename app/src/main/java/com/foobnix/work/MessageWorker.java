@@ -21,6 +21,17 @@ import java.util.Collection;
 import java.util.ArrayList;
 
 abstract class MessageWorker extends Worker {
+    private static int activeWorkers;
+
+    private static synchronized void started() {
+        activeWorkers++;
+        BooksService.isRunning = true;
+    }
+
+    private static synchronized boolean finished() {
+        BooksService.isRunning = --activeWorkers > 0;
+        return !BooksService.isRunning;
+    }
 
     public MessageWorker(@NonNull Context context, @NonNull WorkerParameters workerParams) {
         super(context, workerParams);
@@ -35,12 +46,12 @@ abstract class MessageWorker extends Worker {
 
     @NonNull @Override public Result doWork() {
         boolean notifyResult = false;
+        started();
         try {
             Prefs.get().init(getApplicationContext());
             LOG.d("MessageWorker-Status", "Status: #1 Started", this.getClass(), Thread.currentThread());
-            BooksService.isRunning = true;
             notifyResult = doWorkInner();
-            return Result.success();
+            return notifyResult ? Result.success() : Result.failure();
         } catch (Exception e) {
             LOG.e(e);
             return Result.failure();
@@ -50,18 +61,21 @@ abstract class MessageWorker extends Worker {
         } catch (Throwable e) {
             return Result.failure();
         } finally {
-            if (notifyResult) {
-                sendFinishMessage();
-            } else {
-                LOG.d("MessageWorker-Status", "Status: #0 Cancelled", this.getClass(), Thread.currentThread());
+            if (finished()) {
+                if (notifyResult) {
+                    sendFinishMessage();
+                } else {
+                    // Failure and cancellation must also release the library's busy UI.
+                    // Do not publish the success-only synchronization event.
+                    sendFinishMessage(getApplicationContext());
+                }
             }
-            BooksService.isRunning = false;
             LOG.d("MessageWorker-Status", "Status: #2 Finished", this.getClass(), Thread.currentThread());
         }
 
     }
 
-    abstract boolean doWorkInner() throws IOException;
+    abstract boolean doWorkInner() throws IOException, InterruptedException;
 
     protected void sendFinishMessage() {
         try {

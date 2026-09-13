@@ -1,4 +1,6 @@
 <resources>
+    <string name="fast_calibre_scan">Fast scans of Calibre libraries</string>
+    <string name="fast_calibre_scan_description">Find books added through Calibre. Turn off to check every folder. Other libraries always use folder scanning.</string>
    <string name="___LIBRARY___SETTINGS___SECTION___"></string>
    <string name="library_settings">Library Settings</string>
    <string name="scan_device_for_new_books">Folders to Scan</string>
@@ -293,6 +295,7 @@
    <string name="contrast">Contrast</string>
    <string name="make_text_bold">Emphasize all</string>
    <string name="searching_please_wait_">Searching …</string>
+   <string name="calibre_scan_fallback">Checking folders — Calibre database unavailable or out of date</string>
    <string name="msg_no_text_found">Text not found</string>
    <string name="annotations_draw">Annotations and Drawings</string>
    <string name="go_to_page_dialog">Go to Page</string>

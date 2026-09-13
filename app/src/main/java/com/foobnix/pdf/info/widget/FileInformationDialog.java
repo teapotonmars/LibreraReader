@@ -258,12 +258,8 @@ public class FileInformationDialog {
 
         ((TextView) dialog.findViewById(R.id.isbn)).setText(showKeys(fileMeta.getIsbn()));
 
-        if (fileMeta.getPages() != null && fileMeta.getPages() != 0) {
-            ((TextView) dialog.findViewById(R.id.size)).setText(
-                    fileMeta.getSizeTxt() + " (" + fileMeta.getPages() + ")");
-        } else {
-            ((TextView) dialog.findViewById(R.id.size)).setText(fileMeta.getSizeTxt());
-        }
+        ((TextView) dialog.findViewById(R.id.size)).setText(
+                com.foobnix.ui2.adapter.BookSizeText.format(fileMeta));
 
         File mimeFile = isSaf ? new File(TxtUtils.nullToEmpty(fileMeta.getPathTxt())) : file;
         ((TextView) dialog.findViewById(R.id.mimeType)).setText("" + ExtUtils.getMimeType(mimeFile));

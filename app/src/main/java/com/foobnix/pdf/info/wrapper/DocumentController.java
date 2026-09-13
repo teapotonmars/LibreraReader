@@ -748,7 +748,7 @@ public abstract class DocumentController {
         try {
             if (TTSEngine.get().isPlaying()) {
 
-                AppBook bs = SettingsManager.getBookSettings(getCurrentBook().getPath());
+                AppBook bs = SettingsManager.getBookSettings(getBookIdentity());
 
                 if (getCurrentBook().getPath().equals(AppSP.get().lastBookPath)) {
                     onGoToPage(bs.getCurrentPage(getPageCount()).viewIndex + 1);
@@ -825,7 +825,7 @@ public abstract class DocumentController {
 
         try {
             if (getPageCount() != 0) {
-                AppBook bs = SettingsManager.getBookSettings(getCurrentBook().getPath());
+                AppBook bs = SettingsManager.getBookSettings(getBookIdentity());
                 int page = bs.getCurrentPage(getPageCount()).viewIndex + 1;
                 if (getCurentPage() != page) {
                     page = findBookmarkPage(page, null, bs.pt);
@@ -840,7 +840,21 @@ public abstract class DocumentController {
     }
 
     public FileMeta getBookFileMeta() {
-        return AppDB.get().getOrCreate(getCurrentBook().getPath());
+        return ExtUtils.readerBookMeta(getActivity().getIntent(), getCurrentBook().getPath());
+    }
+
+    public String getBookIdentity() {
+        return ExtUtils.recentPathFromIntent(getActivity().getIntent(), getCurrentBook().getPath());
+    }
+
+    public AppBookmark createBookmark(String text) {
+        return new AppBookmark(getBookIdentity(), text, getPercentage());
+    }
+
+    public String getBookDisplayName() {
+        FileMeta meta = getBookFileMeta();
+        return TxtUtils.isNotEmpty(meta.getPathTxt())
+                ? new File(meta.getPathTxt()).getName() : getCurrentBook().getName();
     }
 
     public String getBookFileMetaName() {
@@ -1098,6 +1112,7 @@ public abstract class DocumentController {
     public void setCurrentBook(final File currentBook) {
         this.currentBook = currentBook;
         AppSP.get().lastBookPath = currentBook.getPath();
+        AppSP.get().lastBookOriginalUri = activity.getIntent().getStringExtra("SAF_ORIGINAL_URI");
         TempHolder.get().loadingCancelled.set(false);
         LOG.d("setCurrentBook",currentBook);
     }

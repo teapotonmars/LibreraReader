@@ -346,6 +346,8 @@ dependencies {
     testImplementation(libs.kxml2)
     androidTestImplementation(libs.runner)
     androidTestImplementation(libs.androidx.junit)
+    // WorkManager fixture databases use Room already supplied by work-runtime.
+    androidTestCompileOnly("androidx.room:room-runtime:2.7.0")
 
 }
 

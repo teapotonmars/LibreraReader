@@ -48,6 +48,9 @@ public class FileMetaCore {
         try {
 
             String path = a.getIntent().getData().getPath();
+            // SAF metadata is indexed under the original URI. Never create a second book
+            // from the staged filename or overwrite library metadata during reader startup.
+            if (ExtUtils.isExteralSD(ExtUtils.recentPathFromIntent(a.getIntent(), path))) return;
 
             LOG.d("checkOrCreateMetaInfo", path);
             if (new File(path).isFile()) {

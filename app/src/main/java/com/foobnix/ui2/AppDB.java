@@ -1,5 +1,6 @@
 package com.foobnix.ui2;
 
+import java.util.Collection;
 import android.content.Context;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
@@ -323,6 +324,35 @@ public class AppDB {
             return null;
         }
         return fileMetaDao.load(path);
+    }
+
+    /** Update only reading progress, preserving concurrently extracted book metadata. */
+    public void updateReadingProgress(String path, float progress) {
+        FileMetaDao dao = fileMetaDao;
+        if (dao == null) return;
+        dao.getDatabase().execSQL("UPDATE FILE_META SET IS_RECENT_PROGRESS=? WHERE PATH=?",
+                new Object[]{progress, path});
+        FileMeta cached = dao.load(path);
+        if (cached != null) cached.setIsRecentProgress(progress);
+    }
+
+    /** Detached snapshots: one query per batch, without invalidating the DAO identity cache. */
+    public List<FileMeta> loadFresh(Collection<String> paths) {
+        FileMetaDao dao = fileMetaDao;
+        List<FileMeta> result = new ArrayList<>();
+        if (dao == null || paths.isEmpty()) return result;
+        List<String> keys = new ArrayList<>(paths);
+        String columns = "\"" + String.join("\",\"", dao.getAllColumns()) + "\"";
+        for (int start = 0; start < keys.size(); start += 128) {
+            List<String> batch = keys.subList(start, Math.min(start + 128, keys.size()));
+            String sql = "SELECT " + columns + " FROM \"" + dao.getTablename()
+                    + "\" WHERE \"PATH\" IN ("
+                    + String.join(",", Collections.nCopies(batch.size(), "?")) + ")";
+            try (Cursor cursor = dao.getDatabase().rawQuery(sql, batch.toArray(new String[0]))) {
+                while (cursor.moveToNext()) result.add(dao.readEntity(cursor, 0));
+            }
+        }
+        return result;
     }
 
     public FileMeta getOrCreate(String path) {

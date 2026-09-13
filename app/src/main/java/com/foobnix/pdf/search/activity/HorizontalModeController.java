@@ -99,7 +99,7 @@ public abstract class HorizontalModeController extends DocumentController {
         bookPath = Apps.getBookPathFromActivity(activity);
         setCurrentBook(new File(bookPath));
 
-        AppBook bs = SettingsManager.getBookSettings(bookPath);
+        AppBook bs = SettingsManager.getBookSettings(activity.getIntent(), bookPath);
 
         if (bs != null) {
             LOG.d("isRTL", "AppBook.rtl", bs.rtl);
@@ -125,7 +125,7 @@ public abstract class HorizontalModeController extends DocumentController {
 
         FileMetaCore.checkOrCreateMetaInfo(activity);
         BookCSS.get()
-               .detectLang(bookPath);
+               .detectLang(ExtUtils.recentPathFromIntent(activity.getIntent(), bookPath));
 
         String pasw = activity.getIntent()
                               .getStringExtra(EXTRA_PASSWORD);
@@ -149,7 +149,7 @@ public abstract class HorizontalModeController extends DocumentController {
 
         try {
             FileMeta meta = AppDB.get()
-                                 .load(bookPath);
+                                 .load(ExtUtils.recentPathFromIntent(activity.getIntent(), bookPath));
             if (meta != null) {
                 meta.setPages(pagesCount);
                 AppDB.get()
@@ -202,7 +202,10 @@ public abstract class HorizontalModeController extends DocumentController {
 
     public static String getTempTitle(Activity a) {
         try {
-            return getTitle(Apps.getBookPathFromActivity(a));
+            String safTitle = ExtUtils.safReaderTitle(a.getIntent(), Apps.getBookPathFromActivity(a));
+            if (safTitle != null) return safTitle;
+            return getTitle(ExtUtils.recentPathFromIntent(a.getIntent(),
+                    Apps.getBookPathFromActivity(a)));
         } catch (Exception e) {
             LOG.e(e);
             return "";
@@ -210,6 +213,15 @@ public abstract class HorizontalModeController extends DocumentController {
     }
 
     public static String getTitle(String path) {
+        if (ExtUtils.isExteralSD(path)) {
+            FileMeta meta = AppDB.get().getOrCreate(path);
+            if (TxtUtils.isNotEmpty(meta.getTitle())) {
+                return meta.getTitle();
+            }
+            if (TxtUtils.isNotEmpty(meta.getPathTxt())) {
+                return meta.getPathTxt();
+            }
+        }
         if (ExtUtils.hasTitle(path)) {
             return AppDB.get()
                         .getOrCreate(path)
@@ -781,7 +793,9 @@ public abstract class HorizontalModeController extends DocumentController {
     }
 
     @Override public String getTitle() {
-        return getTitle(getBookPath());
+        String safTitle = ExtUtils.safReaderTitle(getActivity().getIntent(), getBookPath());
+        if (safTitle != null) return safTitle;
+        return getTitle(ExtUtils.recentPathFromIntent(getActivity().getIntent(), getBookPath()));
     }
 
     @Override public void alignDocument() {

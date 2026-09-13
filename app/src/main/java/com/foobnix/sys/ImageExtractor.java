@@ -1,5 +1,6 @@
 package com.foobnix.sys;
 
+import com.foobnix.pdf.info.SafFileLink;
 import static com.foobnix.pdf.info.io.SearchCore.SUPPORTED_EXT_FILES_ONLY;
 
 import android.content.Context;
@@ -94,7 +95,6 @@ public class ImageExtractor {
     public static final int COVER_PAGE_WITH_EFFECT = -3;
     public static final int COVER_PAGE_NO_EFFECT = -2;
     public static final int COVER_PAGE = -1;
-    private static final AtomicLong safCoverCounter = new AtomicLong();
     public static SharedPreferences sp;
     public static volatile CodecDocument codeCache;
     public static volatile CodecContext codecContex;
@@ -292,6 +292,16 @@ public class ImageExtractor {
 
 
     private Bitmap renderCoverFromSafOpf(SafOpfRegistry.Entry entry, int width) {
+        // Calibre's standard sidecar avoids downloading the ebook or parsing OPF to get pixels.
+        Uri cover = entry.siblingByLowerName.get("cover.jpg");
+        if (cover != null) {
+            try (InputStream in = c.getContentResolver().openInputStream(cover)) {
+                if (in != null) {
+                    Bitmap bitmap = BaseExtractor.arrayToBitmap(BaseExtractor.getEntryAsByte(in), width);
+                    if (bitmap != null) return bitmap;
+                }
+            } catch (Exception e) { LOG.e(e); }
+        }
         try (InputStream in = c.getContentResolver().openInputStream(entry.opfUri)) {
             if (in == null) return null;
             EbookMeta meta = CalirbeExtractor.getBookMetaInformationFromStream(
@@ -307,9 +317,17 @@ public class ImageExtractor {
     private Bitmap proccessSAFCoverPage(PageUrl pageUrl) {
         Uri uri = Uri.parse(pageUrl.getPath());
         String displayName = ExtUtils.getFileName(pageUrl.getPath());
-        ParcelFileDescriptor pfd = null;
-        File linkFile = null;
+        SafFileLink link = null;
         try {
+            if (AppState.get().isUseCalibreOpf) {
+                SafOpfRegistry.restore(c);
+                SafOpfRegistry.Entry entry = SafOpfRegistry.get(pageUrl.getPath());
+                if (entry != null) {
+                    Bitmap opfCover = renderCoverFromSafOpf(entry, pageUrl.getWidth());
+                    if (opfCover != null) return opfCover;
+                }
+            }
+
             Cursor cursor = c.getContentResolver().query(uri,
                     new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null);
             if (cursor != null) {
@@ -320,32 +338,13 @@ public class ImageExtractor {
                 }
             }
 
-            if (AppState.get().isUseCalibreOpf) {
-                SafOpfRegistry.Entry entry = SafOpfRegistry.get(pageUrl.getPath());
-                if (entry != null) {
-                    Bitmap opfCover = renderCoverFromSafOpf(entry, pageUrl.getWidth());
-                    if (opfCover != null) return opfCover;
-                }
-            }
-
-            pfd = c.getContentResolver().openFileDescriptor(uri, "r");
-            if (pfd == null) return BaseExtractor.getBookCoverWithTitle("", displayName, true);
-
-            long uniq = safCoverCounter.incrementAndGet();
-            linkFile = new File(c.getCacheDir(), "saf_cover_" + uniq + "_" + displayName);
-            linkFile.delete();
-            android.system.Os.symlink("/proc/self/fd/" + pfd.getFd(), linkFile.getAbsolutePath());
-
-            String linkPath = linkFile.getPath();
-            EbookMeta ebookMeta = FileMetaCore.get().getEbookMeta(linkPath, CacheDir.ZipApp, true);
+            link = new SafFileLink(c, uri, displayName);
+            String linkPath = link.file.getPath();
+            // Cover loading owns pixels, not library metadata. Avoid a second metadata pass
+            // and prevent filename guesses from overwriting authoritative OPF metadata.
+            EbookMeta ebookMeta = FileMetaCore.get().getEbookMeta(linkPath, CacheDir.ZipApp, false);
             String unZipPath = ebookMeta.getUnzipPath();
-
             FileMeta fileMeta = AppDB.get().getOrCreate(pageUrl.getPath());
-            if (fileMeta.getState() != FileMetaCore.STATE_FULL) {
-                FileMetaCore.get().udpateFullMeta(fileMeta, ebookMeta);
-                if (com.foobnix.android.utils.TxtUtils.isEmpty(fileMeta.getTitle())) fileMeta.setTitle(displayName);
-                AppDB.get().save(fileMeta);
-            }
 
             Bitmap cover = null;
             if (ebookMeta.coverImage != null) {
@@ -376,9 +375,8 @@ public class ImageExtractor {
             LOG.e(e);
             return BaseExtractor.getBookCoverWithTitle("", displayName, true);
         } finally {
-            if (linkFile != null) linkFile.delete();
-            if (pfd != null) {
-                try { pfd.close(); } catch (Exception ignored) {}
+            if (link != null) {
+                try { link.close(); } catch (Exception e) { LOG.e(e); }
             }
         }
     }

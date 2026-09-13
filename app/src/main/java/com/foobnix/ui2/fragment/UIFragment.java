@@ -1,5 +1,6 @@
 package com.foobnix.ui2.fragment;
 
+import com.bumptech.glide.Priority;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -113,6 +114,7 @@ public abstract class UIFragment<T> extends Fragment {
     @Override
     public void onViewCreated(View view, Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
+        if (populateAgain) populate();
 
         //TxtUtils.updateAllLinks(view);
         if (AppState.get().appTheme == AppState.THEME_INK) {
@@ -510,6 +512,16 @@ public abstract class UIFragment<T> extends Fragment {
 
     }
 
+    @Override public void onDestroyView() {
+        populateGeneration++;
+        handler.removeCallbacks(showProgress);
+        if (coverPreloader != null && recyclerView != null) {
+            recyclerView.removeOnScrollListener(coverPreloader);
+            coverPreloader = null;
+        }
+        super.onDestroyView();
+    }
+
     @Override
     public void onDestroy() {
         super.onDestroy();
@@ -532,64 +544,57 @@ public abstract class UIFragment<T> extends Fragment {
         return MyProgressBar != null && MyProgressBar.getVisibility() == View.VISIBLE;
     }
 
+    private boolean populateAgain;
+    private int populateGeneration;
+    private final Runnable showProgress = () -> {
+        if (inProgress && MyProgressBar != null) MyProgressBar.setVisibility(View.VISIBLE);
+    };
+
     public void populate() {
-        if (inProgress) {
-            LOG.d("IN_PROGRESS");
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post(this::populate);
             return;
         }
-
-        final Runnable target = () -> {
-
-            if (getActivity() == null) {
-                return;
-            }
-
-            getActivity().runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    if (MyProgressBar != null) {
-                        handler.postDelayed(new Runnable() {
-
-                            @Override
-                            public void run() {
-                                MyProgressBar.setVisibility(View.VISIBLE);
-                            }
-                        }, 100);
-                    }
-                }
-            });
-
-            final List<T> result;
+        int generation = ++populateGeneration;
+        if (inProgress) {
+            populateAgain = true;
+            return;
+        }
+        if (!isAdded() || getView() == null) {
+            // Several tabs request their first load inside onCreateView, before Fragment
+            // has attached the returned view. Keep that request until onViewCreated.
+            populateAgain = true;
+            return;
+        }
+        inProgress = true;
+        populateAgain = false;
+        handler.postDelayed(showProgress, 100);
+        AppsConfig.executorService.submit(() -> {
+            List<T> result = null;
+            boolean succeeded = false;
             try {
-                inProgress = true;
                 result = prepareDataInBackgroundSync();
-            } finally {
+                succeeded = true;
+            } catch (Exception e) {
+                LOG.e(e);
+            }
+            final List<T> prepared = result;
+            final boolean ready = succeeded;
+            handler.post(() -> {
                 inProgress = false;
-
-            }
-            if (isDetached() || Apps.isDestroyedActivity(getActivity())) {
-                return;
-            }
-
-            getActivity().runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    if (isAdded()) {
-                        if (MyProgressBar != null) {
-                            handler.removeCallbacksAndMessages(null);
-                            MyProgressBar.setVisibility(View.GONE);
-                        }
-                        try {
-                            populateDataInUI(result);
-                        } catch (Exception e) {
-                            LOG.e(e);
-                        }
+                handler.removeCallbacks(showProgress);
+                if (MyProgressBar != null) MyProgressBar.setVisibility(View.GONE);
+                if (!isAdded() || getView() == null) return;
+                if (ready && generation == populateGeneration) {
+                    try {
+                        populateDataInUI(prepared);
+                    } catch (Exception e) {
+                        LOG.e(e);
                     }
-
                 }
+                if (populateAgain) populate();
             });
-        };
-        AppsConfig.executorService.submit(target);
+        });
     }
 
     public void onGridList(int mode,
@@ -739,13 +744,15 @@ public abstract class UIFragment<T> extends Fragment {
             }
 
             @Override public RequestBuilder<?> getPreloadRequestBuilder(FileMeta item) {
-                return IMG.getCoverPageWithEffect(getActivity(), item.getPath(), null);
+                if (!AppState.get().isShowImages) return null;
+                return IMG.getCoverPageWithEffect(getActivity(), item, null)
+                        .priority(Priority.LOW);
             }
         };
 
         PreloadSizeProvider<FileMeta> sizeProvider = new FixedPreloadSizeProvider<>(imageSize, imageSize);
-        // Preload roughly one grid's worth ahead; direction flips automatically on scroll reverse.
-        return new RecyclerViewPreloader<>(Glide.with(getActivity()), modelProvider, sizeProvider, 12);
+        // Give remote covers several screens of lead time; visible requests have higher priority.
+        return new RecyclerViewPreloader<>(Glide.with(getActivity()), modelProvider, sizeProvider, 36);
     }
 
     public boolean onKeyDown(int keyCode) {

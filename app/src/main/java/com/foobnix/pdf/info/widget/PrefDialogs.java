@@ -127,7 +127,21 @@ public class PrefDialogs {
 
         list.setAdapter(recentAdapter);
 
-        builder.setView(list);
+        android.widget.LinearLayout scanOptions = new android.widget.LinearLayout(a);
+        scanOptions.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.widget.CheckBox calibreScan = new android.widget.CheckBox(a);
+        calibreScan.setText(R.string.fast_calibre_scan);
+        calibreScan.setChecked(AppState.get().isUseCalibreDatabaseForScan);
+        calibreScan.setOnCheckedChangeListener((button, checked) -> {
+            AppState.get().isUseCalibreDatabaseForScan = checked;
+            AppState.get().save(a);
+        });
+        android.widget.TextView scanDescription = new android.widget.TextView(a);
+        scanDescription.setText(R.string.fast_calibre_scan_description);
+        scanOptions.addView(calibreScan);
+        scanOptions.addView(scanDescription);
+        scanOptions.addView(list);
+        builder.setView(scanOptions);
 
         builder.setPositiveButton(R.string.search, new DialogInterface.OnClickListener() {
             @Override

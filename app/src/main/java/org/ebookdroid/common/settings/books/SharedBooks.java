@@ -17,6 +17,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.function.Supplier;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class SharedBooks {
@@ -31,13 +33,15 @@ public class SharedBooks {
 
         long a = System.currentTimeMillis();
         preloadAll();
-
-        // Only the books whose bar has actually moved are written back: the whole shelf was
-        // being rewritten row by row on every refresh, for a handful of changes at most.
         final List<FileMeta> changed = new ArrayList<>();
-        for (FileMeta meta : list) {
+        List<String> paths = new ArrayList<>(list.size());
+        for (FileMeta meta : list) paths.add(meta.getPath());
+        List<AppBook> progress = loadAll(paths, SharedBooks::readProgressFiles);
+        for (int i = 0; i < list.size(); i++) {
             try {
-                AppBook book = SharedBooks.load(meta.getPath());
+                FileMeta meta = list.get(i);
+                AppBook book = progress.get(i);
+                if (book == null) continue;
                 final Float was = meta.getIsRecentProgress();
                 final Long wasTime = meta.getIsRecentTime();
                 meta.setIsRecentProgress(book.p);
@@ -243,17 +247,44 @@ public class SharedBooks {
     }
 
     public static AppBook load(String fileName) {
+        return load(fileName, null);
+    }
+
+    private static Map<File, LinkedJSONObject> readProgressFiles() {
+        Map<File, LinkedJSONObject> result = new LinkedHashMap<>();
+        for (File file : AppProfile.getAllFiles(AppProfile.APP_PROGRESS_JSON)) {
+            result.put(file, IO.readJsonObject(file));
+        }
+        return result;
+    }
+
+    /** One profile read per batch, regardless of the number of uncached books. */
+    static List<AppBook> loadAll(List<String> paths, Supplier<Map<File, LinkedJSONObject>> readFiles) {
+        Map<File, LinkedJSONObject> files = null;
+        List<AppBook> result = new ArrayList<>(paths.size());
+        for (String path : paths) {
+            try {
+                AppBook cached = cache.get(ExtUtils.getFileName(path));
+                if (cached != null) result.add(cached);
+                else {
+                    if (files == null) files = readFiles.get();
+                    result.add(load(path, files));
+                }
+            } catch (Exception e) {
+                LOG.e(e);
+                result.add(null);
+            }
+        }
+        return result;
+    }
+
+    private static AppBook load(String fileName, Map<File, LinkedJSONObject> files) {
         LOG.d("SharedBooks-load", fileName);
 
-        // Keyed by the name the progress files themselves are keyed by, not by the full path.
-        // Saving keys by that name, so a cache keyed by path was never the one a save updated:
-        // a book closed at a new page went on being read back at the old one until something
-        // else cleared the cache.
         final String key = ExtUtils.getFileName(fileName);
         AppBook cached = cache.get(key);
         if (cached != null) {
             LOG.d("SharedBooks-load-from-cache", fileName);
-            // The record is shared by every file of that name; the path is whose it is now.
             cached.path = fileName;
             return cached;
         }
@@ -261,8 +292,10 @@ public class SharedBooks {
         AppBook res = new AppBook(fileName);
         AppBook original = null;
 
-        for (File file : AppProfile.getAllFiles(AppProfile.APP_PROGRESS_JSON)) {
-            final AppBook load = load(IO.readJsonObject(file), fileName);
+        if (files == null) files = readProgressFiles();
+        for (Map.Entry<File, LinkedJSONObject> source : files.entrySet()) {
+            File file = source.getKey();
+            final AppBook load = load(source.getValue(), fileName);
             if (TxtUtils.isEmpty(load.path)) {
                 continue;
             }
@@ -281,13 +314,13 @@ public class SharedBooks {
             original.pt = res.pt;
             original.t = Math.max(res.t, original.t);
             LOG.d("SharedBooks-load1 original", fileName, res.p);
-            cache.put(key, original);
-            return original;
+            AppBook concurrent = cache.putIfAbsent(key, original);
+            return concurrent == null ? original : concurrent;
         }
 
         LOG.d("SharedBooks-load1 general", fileName, res.p);
-        cache.put(key, res);
-        return res;
+        AppBook concurrent = cache.putIfAbsent(key, res);
+        return concurrent == null ? res : concurrent;
 
     }
 
@@ -344,6 +377,8 @@ public class SharedBooks {
             final LinkedJSONObject value = Objects.toJSONObject(bs);
             obj.put(fileName, value);
             cache.put(fileName, bs);
+            AppDB.get().updateReadingProgress(bs.path, bs.p);
+            com.foobnix.sys.TempHolder.listHash++;
 
             LOG.d("SharedBooks-Save", value);
 

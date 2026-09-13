@@ -1,5 +1,9 @@
 package com.foobnix.ui2.fragment;
 
+import androidx.recyclerview.widget.DiffUtil;
+import com.foobnix.ui2.adapter.BookRowSnapshot;
+import java.util.HashMap;
+import java.util.Map;
 import static com.foobnix.pdf.info.AppsConfig.SEARCH_FRAGMENT_WORKER_NAME;
 import static com.foobnix.pdf.info.AppsConfig.WORKER_POLICY;
 
@@ -159,6 +163,7 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
         @Override public void onReceive(Context context, Intent intent) {
 
             if (BooksService.RESULT_SEARCH_FINISH.equals(intent.getStringExtra(Intent.EXTRA_TEXT))) {
+                if (BooksService.isRunning) return;
                 isExtractingLibrary = false;
                 searchAndOrderAsync();
                 setSearchHint(R.string.library);
@@ -687,6 +692,13 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
     @Override public void onResume() {
         super.onResume();
         menu2.setVisibility(getActivity().findViewById(R.id.imageMenu1) == null ? View.GONE : View.VISIBLE);
+        if (searchAdapter != null) {
+            List<String> paths = new ArrayList<>();
+            for (FileMeta row : searchAdapter.getItemsList()) {
+                if (row.getPath() != null) paths.add(row.getPath());
+            }
+            updateMetadataRows(paths);
+        }
     }
 
     @Override public void onStop() {
@@ -768,26 +780,116 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
         sortBy.setContentDescription(getString(R.string.cd_sort_results) + " " + getString(
                 AppDB.SORT_BY.getByID(AppState.get().sortBy).getResName()) + ", " + order);
 
+        searchTextSnapshot = searchEditText.getText().toString().trim();
         populate();
 
     }
 
-    private void updateMetadataRows(List<String> paths) {
-        if (paths == null || paths.isEmpty() || searchAdapter == null) return;
-        Set<String> changed = new HashSet<>(paths);
-        List<FileMeta> displayed = searchAdapter.getItemsList();
-        // The worker updates different entity instances on a background thread. GreenDAO's
-        // identity scope can otherwise hand the UI its already-bound, stale instance again.
-        AppDB.get().getDao().detachAll();
-        for (int i = 0; i < displayed.size(); i++) {
-            FileMeta old = displayed.get(i);
-            if (old == null || !changed.contains(old.getPath())) continue;
-            FileMeta updated = AppDB.get().load(old.getPath());
-            if (updated != null) {
-                displayed.set(i, updated);
-                searchAdapter.notifyItemChanged(i);
+    private List<BookRowSnapshot> renderedRows = new ArrayList<>();
+    private Map<String, Integer> displayedPositions = new HashMap<>();
+    private int listUpdateGeneration;
+    private boolean listDiffInProgress;
+    private int metadataViewGeneration;
+    private final Map<String, FileMeta> metadataDuringDiff = new HashMap<>();
+
+    private void publishBookList(List<FileMeta> items) {
+        if (items == null) return;
+        int generation = ++listUpdateGeneration;
+        List<FileMeta> replacement = new ArrayList<>(items);
+        List<BookRowSnapshot> before = new ArrayList<>(renderedRows);
+        List<BookRowSnapshot> after = new ArrayList<>(items.size());
+        for (FileMeta item : replacement) after.add(new BookRowSnapshot(item));
+        metadataDuringDiff.clear();
+        listDiffInProgress = true;
+        AppsConfig.executorService.submit(() -> {
+            Map<String, Integer> positions = new HashMap<>();
+            for (int i = 0; i < replacement.size(); i++) {
+                String path = replacement.get(i).getPath();
+                if (path != null) positions.put(path, i);
             }
+            DiffUtil.DiffResult diff = DiffUtil.calculateDiff(
+                    new DiffUtil.Callback() {
+                        @Override public int getOldListSize() { return before.size(); }
+                        @Override public int getNewListSize() { return after.size(); }
+                        @Override public boolean areItemsTheSame(int oldPosition, int newPosition) {
+                            return before.get(oldPosition).identity.equals(after.get(newPosition).identity);
+                        }
+                        @Override public boolean areContentsTheSame(int oldPosition, int newPosition) {
+                            return before.get(oldPosition).content.equals(after.get(newPosition).content);
+                        }
+                    }, false);
+            handler.post(() -> {
+                if (generation != listUpdateGeneration || !isAdded() || getView() == null) return;
+                listDiffInProgress = false;
+                List<Integer> additionallyChanged = new ArrayList<>();
+                for (int i = 0; i < replacement.size(); i++) {
+                    FileMeta latest = metadataDuringDiff.get(replacement.get(i).getPath());
+                    if (latest != null) {
+                        replacement.set(i, latest);
+                        after.set(i, new BookRowSnapshot(latest));
+                        additionallyChanged.add(i);
+                    }
+                }
+                searchAdapter.clearItems();
+                searchAdapter.getItemsList().addAll(replacement);
+                renderedRows = after;
+                displayedPositions = positions;
+                diff.dispatchUpdatesTo(searchAdapter);
+                for (int position : additionallyChanged) searchAdapter.notifyItemChanged(position);
+                metadataDuringDiff.clear();
+            });
+        });
+    }
+
+    private final Set<String> pendingMetadataPaths = new HashSet<>();
+    private boolean metadataLoadInProgress;
+    private boolean metadataFlushScheduled;
+    private volatile String searchTextSnapshot = "";
+    private final Runnable flushMetadata = this::loadMetadataRows;
+
+    private void updateMetadataRows(List<String> paths) {
+        if (paths == null || paths.isEmpty()) return;
+        pendingMetadataPaths.addAll(paths);
+        if (!metadataLoadInProgress && !metadataFlushScheduled) {
+            metadataFlushScheduled = true;
+            handler.postDelayed(flushMetadata, 100);
         }
+    }
+
+    private void loadMetadataRows() {
+        metadataFlushScheduled = false;
+        if (metadataLoadInProgress || pendingMetadataPaths.isEmpty() || !isAdded()) return;
+        Set<String> paths = new HashSet<>(pendingMetadataPaths);
+        pendingMetadataPaths.clear();
+        metadataLoadInProgress = true;
+        int generation = metadataViewGeneration;
+        AppsConfig.executorService.submit(() -> {
+            Map<String, FileMeta> updated = new HashMap<>();
+            try {
+                for (FileMeta row : AppDB.get().loadFresh(paths)) updated.put(row.getPath(), row);
+            } catch (Exception e) {
+                LOG.e(e);
+            }
+            handler.post(() -> {
+                if (generation != metadataViewGeneration) return;
+                metadataLoadInProgress = false;
+                if (!isAdded() || getView() == null || searchAdapter == null) return;
+                if (listDiffInProgress) metadataDuringDiff.putAll(updated);
+                List<FileMeta> displayed = searchAdapter.getItemsList();
+                for (Map.Entry<String, FileMeta> entry : updated.entrySet()) {
+                    Integer position = displayedPositions.get(entry.getKey());
+                    if (position == null || position >= displayed.size()) continue;
+                    FileMeta row = entry.getValue();
+                    displayed.set(position, row);
+                    renderedRows.set(position, new BookRowSnapshot(row));
+                    searchAdapter.notifyItemChanged(position);
+                }
+                if (!pendingMetadataPaths.isEmpty()) {
+                    metadataFlushScheduled = true;
+                    handler.postDelayed(flushMetadata, 100);
+                }
+            });
+        });
     }
 
     @Subscribe public void onShowTag(OpenTagMessage msg) {
@@ -800,9 +902,7 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
 
     @Override public List<FileMeta> prepareDataInBackground() {
         LOG.d("SeachFragment2", "prepareDataInBackground");
-        String txt = searchEditText.getText()
-                                   .toString()
-                                   .trim();
+        String txt = searchTextSnapshot;
         countTitles = 0;
         if (Arrays.asList(AppState.MODE_GRID, AppState.MODE_COVERS, AppState.MODE_LIST, AppState.MODE_LIST_COMPACT)
                   .contains(AppState.get().libraryMode)) {
@@ -984,21 +1084,17 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
             sortBy.setEnabled(true);
             sortBy.setVisibility(View.VISIBLE);
 
-            searchAdapter.clearItems();
-            searchAdapter.getItemsList()
-                         .addAll(items);
-            searchAdapter.notifyDataSetChanged();
-            handler.postDelayed(new Runnable() {
+            publishBookList(items);
 
-                @Override public void run() {
-                    searchAdapter.notifyDataSetChanged();
-
-                }
-            }, 1000);
 
             // recyclerView.scrollToPosition(0);
 
         } else {
+            listUpdateGeneration++;
+            listDiffInProgress = false;
+            renderedRows.clear();
+            displayedPositions.clear();
+            metadataDuringDiff.clear();
             prevLibModeAuthors = AppState.get().libraryMode;
             searchEditText.setEnabled(false);
             sortBy.setEnabled(false);
@@ -1252,11 +1348,24 @@ public class SearchFragment2 extends UIFragment<FileMeta> {
         }
     }
 
+    @Override public void onDestroyView() {
+        LocalBroadcastManager.getInstance(requireContext()).unregisterReceiver(broadcastReceiver);
+        listUpdateGeneration++;
+        metadataViewGeneration++;
+        listDiffInProgress = false;
+        metadataLoadInProgress = false;
+        metadataFlushScheduled = false;
+        renderedRows.clear();
+        displayedPositions.clear();
+        metadataDuringDiff.clear();
+        pendingMetadataPaths.clear();
+        handler.removeCallbacks(flushMetadata);
+        super.onDestroyView();
+    }
+
     @Override public void onDestroy() {
         super.onDestroy();
         LOG.d("SearchFragment2 onDestroy");
-        LocalBroadcastManager.getInstance(getActivity())
-                             .unregisterReceiver(broadcastReceiver);
         cacheItems = null;
 
     }

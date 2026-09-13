@@ -1,17 +1,24 @@
 package com.foobnix.work;
 
+import com.foobnix.pdf.info.SafFileLink;
+import com.bumptech.glide.Priority;
+import android.util.Log;
+import android.os.SystemClock;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.io.IOException;
 import static com.foobnix.pdf.info.AppsConfig.SEARCH_FRAGMENT_WORKER_NAME;
 import static com.foobnix.pdf.info.AppsConfig.WORKER_POLICY;
 
 import android.content.ContentResolver;
 import android.content.Context;
-import android.database.Cursor;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.ParcelFileDescriptor;
-import android.provider.DocumentsContract;
-import android.system.Os;
 
 import androidx.annotation.NonNull;
 import androidx.work.OneTimeWorkRequest;
@@ -58,18 +65,28 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.ExecutorCompletionService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
-import java.util.concurrent.Future;
 import java.util.concurrent.RecursiveAction;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 
 public class SearchAllBooksWorker extends MessageWorker {
 
-    private static final AtomicLong safLinkCounter = new AtomicLong();
+    private volatile String folderScanStatus;
+
+    @Override protected void sendProggressMessage(java.util.Collection<?> books) {
+        super.sendProggressMessage(books);
+        if (folderScanStatus != null) sendTextMessage(folderScanStatus);
+    }
+
+
+    private ThreadPoolExecutor eagerMetadata;
+    private Set<String> knownPaths;
+    private Set<SimpleMeta> excludedAtStart;
+    private Set<String> syncTitlesAtStart;
+    private final Set<String> eagerCompleted = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean discoveriesPublished = new AtomicBoolean();
+    private long lastLibraryPublish;
 
     Handler handler;
     List<FileMeta> itemsMeta;
@@ -79,6 +96,9 @@ public class SearchAllBooksWorker extends MessageWorker {
         handler = new Handler(Looper.getMainLooper());
 
     }
+
+    private final Set<String> changedCalibrePaths = ConcurrentHashMap.newKeySet();
+    private final List<CalibreLibraryIndex> calibreIndices = new ArrayList<>();
 
     public static void run(Context context) {
 
@@ -91,11 +111,10 @@ public class SearchAllBooksWorker extends MessageWorker {
     }
 
 
-    public boolean doWorkInner() {
+    public boolean doWorkInner() throws IOException, InterruptedException {
         LOG.d("worker-starts", "SearchAllBooksWorker");
         String errorID = AppProfile.getCurrent();
         Prefs.get().put(errorID, 0);
-        ExecutorService executor = null;
         try {
             Tags2.migration();
             // Synchronized because SafSearchTask (fork-join) writes to it from worker
@@ -107,7 +126,7 @@ public class SearchAllBooksWorker extends MessageWorker {
             ImageExtractor.clearErrors();
             // Incremental: keep IMG disc/memory cache — covers of unchanged books stay valid.
 
-            SafOpfRegistry.clear();
+            SafOpfRegistry.restore(getApplicationContext());
 
             // Snapshot existing DB rows so we can diff against discovery and reuse rows
             // (preserving user fields like stars, tags, annotations).
@@ -116,6 +135,15 @@ public class SearchAllBooksWorker extends MessageWorker {
                 existingByPath.put(m.getPath(), m);
             }
 
+            knownPaths = ConcurrentHashMap.newKeySet();
+            knownPaths.addAll(existingByPath.keySet());
+            excludedAtStart = new HashSet<>(AppData.get().getAllExcluded());
+            syncTitlesAtStart = new HashSet<>();
+            for (FileMeta synced : AppData.get().getAllSyncBooks()) syncTitlesAtStart.add(synced.getTitle());
+            int eagerThreads = Math.max(1, Tunables.METADATA_EXTRACTION_PARALLELISM);
+            eagerMetadata = new ThreadPoolExecutor(eagerThreads, eagerThreads,
+                    0, TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<>(16));
             handler.post(timer);
             LOG.d("SearchAllBooksWorker", "searchPaths-all", 3, BookCSS.get().searchPathsJson);
             for (final String path : JsonDB.get(BookCSS.get().searchPathsJson)) {
@@ -164,6 +192,13 @@ public class SearchAllBooksWorker extends MessageWorker {
             }
 
 
+            // New-book extraction overlaps traversal, with a bounded queue. Drain before merging
+            // so discovery and extraction cannot mutate the same row during the final pass.
+            eagerMetadata.shutdown();
+            while (!eagerMetadata.awaitTermination(250, TimeUnit.MILLISECONDS)) {
+                if (isStopped()) return false;
+            }
+
             for (FileMeta meta : itemsMeta) {
                 meta.setIsSearchBook(true);
             }
@@ -203,43 +238,11 @@ public class SearchAllBooksWorker extends MessageWorker {
             itemsMeta.addAll(AppData.get().getAllFavoriteFiles(false));
             itemsMeta.addAll(AppData.get().getAllFavoriteFolders());
 
-            // Merge discoveries with existing DB rows. Reused rows preserve user state;
-            // for SAF, size/date/pathTxt are refreshed from the current SAF listing.
-            Set<String> discoveredPaths = new HashSet<>();
-            List<FileMeta> merged = new ArrayList<>(itemsMeta.size());
-            List<FileMeta> toProcess = new ArrayList<>();
-
-            for (FileMeta discovered : itemsMeta) {
-                discoveredPaths.add(discovered.getPath());
-                FileMeta existing = existingByPath.get(discovered.getPath());
-                FileMeta row;
-                if (existing != null) {
-                    existing.setIsSearchBook(discovered.getIsSearchBook());
-                    if (ExtUtils.isExteralSD(discovered.getPath())) {
-                        if (discovered.getSize() != null) existing.setSize(discovered.getSize());
-                        if (discovered.getDate() != null) existing.setDate(discovered.getDate());
-                        if (TxtUtils.isNotEmpty(discovered.getPathTxt())) existing.setPathTxt(discovered.getPathTxt());
-                    }
-                    row = existing;
-                } else {
-                    row = discovered;
-                }
-                merged.add(row);
-                if (needsFullUpdate(row, existing)) {
-                    toProcess.add(row);
-                }
-            }
-
-            // Books previously in the search set that no longer exist: soft-delete (keep row for
-            // user state, drop the search-visible flag).
-            List<FileMeta> toMarkRemoved = new ArrayList<>();
-            for (Map.Entry<String, FileMeta> e : existingByPath.entrySet()) {
-                if (!discoveredPaths.contains(e.getKey())
-                        && Boolean.TRUE.equals(e.getValue().getIsSearchBook())) {
-                    e.getValue().setIsSearchBook(false);
-                    toMarkRemoved.add(e.getValue());
-                }
-            }
+            LibraryMerge.Result merge = LibraryMerge.merge(itemsMeta, existingByPath,
+                    changedCalibrePaths, eagerCompleted);
+            List<FileMeta> merged = merge.books;
+            List<FileMeta> toProcess = merge.extract;
+            List<FileMeta> toMarkRemoved = merge.removed;
 
             itemsMeta = merged;
 
@@ -263,44 +266,31 @@ public class SearchAllBooksWorker extends MessageWorker {
             // extractions don't hammer the remote provider.
             int threads = Math.max(1, Tunables.METADATA_EXTRACTION_PARALLELISM);
             LOG.d("Metadata extraction parallelism", threads);
-            executor = Executors.newFixedThreadPool(threads);
-
-            ExecutorCompletionService<FileMeta> completions = new ExecutorCompletionService<>(executor);
-            for (final FileMeta meta : toProcess) {
-                completions.submit(() -> {
-                        if (isStopped()) return meta;
-                        try {
-                            extractMetaForBook(meta);
-                        } catch (Throwable t) {
-                            LOG.e(t);
-                        }
-                        return meta;
+            try {
+                boolean finished = BoundedTasks.run(toProcess, threads, this::isStopped, meta -> {
+                    try {
+                        extractMetaForBook(meta);
+                    } catch (Exception e) {
+                        LOG.e(e);
+                    }
+                    return meta;
+                }, meta -> {
+                    AppDB.get().update(meta);
+                    sendMetadataUpdated(Collections.singletonList(meta.getPath()));
                 });
-            }
-            for (int i = 0; i < toProcess.size(); i++) {
-                if (isStopped()) {
-                    executor.shutdownNow();
-                    return false;
-                }
-                try {
-                    FileMeta completed = completions.take().get();
-                    AppDB.get().update(completed);
-                    sendMetadataUpdated(Collections.singletonList(completed.getPath()));
-                } catch (Exception e) {
-                    LOG.e(e);
-                }
+                if (!finished) return false;
+            } catch (ExecutionException e) {
+                throw new IOException("Metadata extraction failed", e.getCause());
             }
 
-            SharedBooks.updateProgress(toProcess, true, -1);
-            if (!toProcess.isEmpty()) {
-                AppDB.get().updateAll(toProcess);
-            }
+            long progressStarted = SystemClock.elapsedRealtime();
+            SharedBooks.updateProgress(merged, true, -1);
+            Log.i("SafScan", "Reading progress ms=" + (SystemClock.elapsedRealtime() - progressStarted));
 
 
             itemsMeta.clear();
 
             handler.removeCallbacks(refreshTimer);
-            sendFinishMessage();
             CacheZipUtils.CacheDir.ZipService.removeCacheContent();
 
             if (isStopped()) {
@@ -330,14 +320,53 @@ public class SearchAllBooksWorker extends MessageWorker {
                 return false;
             }
             updateBookAnnotations();
+            for (CalibreLibraryIndex index : calibreIndices) index.save();
+            SafOpfRegistry.save(getApplicationContext());
+            CoverWarmupWorker.run(getApplicationContext());
         } finally {
-            if (executor != null) executor.shutdownNow();
+            if (eagerMetadata != null) eagerMetadata.shutdownNow();
             Prefs.get().remove(errorID, 0);
             handler.removeCallbacksAndMessages(null);
         }
         return true;
 
 
+    }
+
+    private void publishNewSafBook(FileMeta meta) {
+        if (!knownPaths.add(meta.getPath())
+                || excludedAtStart.contains(SimpleMeta.SyncSimpleMeta(meta.getPath()))
+                || syncTitlesAtStart.contains(meta.getTitle())) return;
+        try {
+            eagerMetadata.execute(() -> {
+                if (isStopped()) return;
+                meta.setIsSearchBook(true);
+                meta.setState(FileMetaCore.STATE_BASIC);
+                AppDB.get().save(meta);
+                discoveriesPublished.set(true);
+                // Start the cover independently: an OPF cover avoids downloading the book.
+                handler.post(() -> {
+                    if (!isStopped() && AppState.get().isShowImages) {
+                        IMG.getCoverPageWithEffect(getApplicationContext(), meta, null)
+                                .priority(Priority.NORMAL).preload();
+                    }
+                });
+                try {
+                    extractMetaForBook(meta);
+                    if (Integer.valueOf(FileMetaCore.STATE_FULL).equals(meta.getState())) {
+                        eagerCompleted.add(meta.getPath());
+                    }
+                } catch (Exception e) {
+                    LOG.e(e);
+                }
+                if (!isStopped()) {
+                    AppDB.get().update(meta);
+                    sendMetadataUpdated(Collections.singletonList(meta.getPath()));
+                }
+            });
+        } catch (RejectedExecutionException full) {
+            // Leave overflow books to the final extraction pass; discovery never blocks.
+        }
     }
 
     private void extractMetaForBook(FileMeta meta) {
@@ -353,24 +382,6 @@ public class SearchAllBooksWorker extends MessageWorker {
         }
     }
 
-    private boolean needsFullUpdate(FileMeta row, FileMeta existing) {
-        if (existing == null) return true;
-        Integer state = existing.getState();
-        if (state == null || state != FileMetaCore.STATE_FULL) return true;
-        Long storedSize = existing.getSize();
-        Long storedDate = existing.getDate();
-        if (storedSize == null || storedDate == null) return true;
-        if (ExtUtils.isExteralSD(row.getPath())) {
-            Long discSize = row.getSize();
-            Long discDate = row.getDate();
-            if (discSize != null && !discSize.equals(storedSize)) return true;
-            if (discDate != null && !discDate.equals(storedDate)) return true;
-            return false;
-        }
-        File f = new File(row.getPath());
-        return f.lastModified() != storedDate || f.length() != storedSize;
-    }
-
     private void extractSAFMeta(FileMeta fileMeta) {
         String displayName = TxtUtils.isNotEmpty(fileMeta.getPathTxt()) ? fileMeta.getPathTxt() : fileMeta.getTitle();
         if (TxtUtils.isEmpty(displayName)) return;
@@ -382,31 +393,14 @@ public class SearchAllBooksWorker extends MessageWorker {
             }
         }
 
-        ParcelFileDescriptor pfd = null;
-        File linkFile = null;
-        try {
-            Uri uri = Uri.parse(fileMeta.getPath());
-            pfd = getApplicationContext().getContentResolver().openFileDescriptor(uri, "r");
-            if (pfd == null) return;
-
-            long uniq = safLinkCounter.incrementAndGet();
-            linkFile = new File(getApplicationContext().getCacheDir(), "saf_meta_" + uniq + "_" + displayName);
-            linkFile.delete();
-            Os.symlink("/proc/self/fd/" + pfd.getFd(), linkFile.getAbsolutePath());
-
-            EbookMeta ebookMeta = FileMetaCore.get().getEbookMeta(linkFile.getPath(), CacheZipUtils.CacheDir.ZipService, true);
+        try (SafFileLink link = new SafFileLink(
+                getApplicationContext(), Uri.parse(fileMeta.getPath()), displayName)) {
+            EbookMeta ebookMeta = FileMetaCore.get().getEbookMeta(
+                    link.file.getPath(), CacheZipUtils.CacheDir.ZipService, true);
             FileMetaCore.get().udpateFullMeta(fileMeta, ebookMeta);
-
-            if (TxtUtils.isEmpty(fileMeta.getTitle())) {
-                fileMeta.setTitle(displayName);
-            }
+            if (TxtUtils.isEmpty(fileMeta.getTitle())) fileMeta.setTitle(displayName);
         } catch (Exception e) {
             LOG.e(e);
-        } finally {
-            if (linkFile != null) linkFile.delete();
-            if (pfd != null) {
-                try { pfd.close(); } catch (Exception ignored) {}
-            }
         }
     }
 
@@ -430,46 +424,85 @@ public class SearchAllBooksWorker extends MessageWorker {
         }
     }
 
-    private static class SafChild {
-        final String name;
-        final Uri uri;
-        final String mimeType;
-        final String sizeStr;
-        final String modifiedStr;
-
-        SafChild(String name, Uri uri, String mimeType, String sizeStr, String modifiedStr) {
-            this.name = name;
-            this.uri = uri;
-            this.mimeType = mimeType;
-            this.sizeStr = sizeStr;
-            this.modifiedStr = modifiedStr;
-        }
-    }
-
-    private void searchSAF(Context context, Uri rootUri, List<FileMeta> items) {
+    private void searchSAF(Context context, Uri rootUri, List<FileMeta> items) throws IOException, InterruptedException {
         // SAF folder listings are network round-trips. Fan out with fork-join so subdirectory
         // queries run in parallel (fork-join avoids the classic thread-starvation deadlock
         // that a fixed pool would hit when every worker is waiting on its children).
-        // Books are written directly into items (must be a thread-safe list) so the
-        // discovery timer sees the count grow live rather than jumping at the end.
+        CalibreLibraryIndex index = null;
+        if (AppState.get().isUseCalibreDatabaseForScan) {
+            try {
+                index = CalibreLibraryIndex.open(context, rootUri, this::isStopped);
+            } catch (IOException unavailable) {
+                if (isStopped()) throw unavailable;
+                context.getSharedPreferences("CalibreDiscovery", Context.MODE_PRIVATE).edit()
+                        .remove(rootUri.toString()).apply();
+                Log.w("SafScan", "Calibre database unavailable; scanning folders", unavailable);
+                folderScanStatus = context.getString(com.foobnix.pdf.info.R.string.calibre_scan_fallback);
+                sendTextMessage(folderScanStatus);
+            }
+        } else {
+            context.getSharedPreferences("CalibreDiscovery", Context.MODE_PRIVATE).edit()
+                    .remove(rootUri.toString()).apply();
+        }
+        if (index != null) {
+            if (index.discoverCached(items, this::publishNewSafBook)) {
+                Map<String, Uri> folders = index.foldersToCheck();
+                if (!folders.isEmpty()) {
+                    AtomicBoolean failed = new AtomicBoolean();
+                    ForkJoinPool pool = new ForkJoinPool(Math.max(1, Tunables.SAF_DISCOVERY_PARALLELISM));
+                    try {
+                        List<SafSearchTask> tasks = new ArrayList<>();
+                        for (Map.Entry<String, Uri> folder : folders.entrySet()) {
+                            tasks.add(new SafSearchTask(context, folder.getValue(), items, failed,
+                                    folder.getKey(), index));
+                        }
+                        pool.invoke(new RecursiveAction() {
+                            @Override protected void compute() { invokeAll(tasks); }
+                        });
+                    } finally { pool.shutdown(); }
+                    if (failed.get()) throw new IOException("Incomplete SAF discovery: " + rootUri);
+                }
+                changedCalibrePaths.addAll(index.changedPaths());
+                calibreIndices.add(index);
+                return;
+            }
+            calibreIndices.add(index);
+        }
+        // Books are published while discovery continues.
         int parallelism = Math.max(1, Tunables.SAF_DISCOVERY_PARALLELISM);
         LOG.d("SAF discovery parallelism", parallelism);
+        long scanStarted = SystemClock.elapsedRealtime();
+        int startingBooks = items.size();
+        Log.i("SafScan", "start parallelism=" + parallelism);
+        AtomicBoolean failed = new AtomicBoolean();
         ForkJoinPool pool = new ForkJoinPool(parallelism);
         try {
-            pool.invoke(new SafSearchTask(context, rootUri, items));
+            pool.invoke(new SafSearchTask(context, rootUri, items, failed, "", index));
         } catch (Exception e) {
+            failed.set(true);
             LOG.e(e);
         } finally {
             pool.shutdown();
+            Log.i("SafScan", "finished ms="
+                    + (SystemClock.elapsedRealtime() - scanStarted)
+                    + " books=" + (items.size() - startingBooks) + " failed=" + failed.get());
         }
+        if (failed.get()) throw new IOException("Incomplete SAF discovery: " + rootUri);
     }
 
     private final class SafSearchTask extends RecursiveAction {
+        private final String relativeFolder;
+        private final CalibreLibraryIndex index;
         private final Context context;
         private final Uri parentUri;
         private final List<FileMeta> found;
+        private final AtomicBoolean failed;
 
-        SafSearchTask(Context context, Uri parentUri, List<FileMeta> found) {
+        SafSearchTask(Context context, Uri parentUri, List<FileMeta> found, AtomicBoolean failed,
+                      String relativeFolder, CalibreLibraryIndex index) {
+            this.relativeFolder = relativeFolder;
+            this.index = index;
+            this.failed = failed;
             this.context = context;
             this.parentUri = parentUri;
             this.found = found;
@@ -479,64 +512,49 @@ public class SearchAllBooksWorker extends MessageWorker {
         protected void compute() {
             if (isStopped()) return;
             try {
-                ContentResolver cr = context.getContentResolver();
-                Uri childrenUri = ExtUtils.getChildUri(context, parentUri);
-                if (childrenUri == null) return;
-
-                List<SafChild> children = new ArrayList<>();
+                if (index != null) index.folder(relativeFolder, parentUri);
+                List<SafDocuments.Document> children = SafDocuments.list(context, parentUri,
+                        SearchAllBooksWorker.this::isStopped);
                 Map<String, Uri> siblingByLowerName = new HashMap<>();
-
-                Cursor cursor = cr.query(childrenUri, new String[]{
-                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                        DocumentsContract.Document.COLUMN_MIME_TYPE,
-                        DocumentsContract.Document.COLUMN_SIZE,
-                        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
-                }, null, null, null);
-                try {
-                    while (cursor != null && cursor.moveToNext()) {
-                        String name = cursor.getString(0);
-                        String docId = cursor.getString(1);
-                        String mimeType = cursor.getString(2);
-                        String sizeStr = cursor.getString(3);
-                        String modifiedStr = cursor.getString(4);
-
-                        Uri docUri = DocumentsContract.buildDocumentUriUsingTree(parentUri, docId);
-                        children.add(new SafChild(name, docUri, mimeType, sizeStr, modifiedStr));
-                        if (name != null && !DocumentsContract.Document.MIME_TYPE_DIR.equals(mimeType)) {
-                            siblingByLowerName.put(name.toLowerCase(Locale.US), docUri);
-                        }
+                for (SafDocuments.Document child : children) {
+                    if (!child.directory && child.name != null) {
+                        siblingByLowerName.put(child.name.toLowerCase(Locale.US), child.uri);
                     }
-                } finally {
-                    if (cursor != null) cursor.close();
                 }
 
                 List<SafSearchTask> subtasks = new ArrayList<>();
-                for (SafChild child : children) {
-                    if (DocumentsContract.Document.MIME_TYPE_DIR.equals(child.mimeType)) {
-                        subtasks.add(new SafSearchTask(context, child.uri, found));
+                for (SafDocuments.Document child : children) {
+                    if (child.directory) {
+                        subtasks.add(new SafSearchTask(context, child.uri, found, failed,
+                                relativeFolder.isEmpty() ? child.name : relativeFolder + "/" + child.name, index));
                     } else if (SearchCore.endWith(child.name, ExtUtils.seachExts)) {
-                        FileMeta meta = new FileMeta(child.uri.toString());
-                        meta.setTitle(child.name);
-                        meta.setPathTxt(child.name);
-                        meta.setExt(ExtUtils.getFileExtension(child.name));
-                        try {
-                            if (child.sizeStr != null) meta.setSize(Long.parseLong(child.sizeStr));
-                            if (child.modifiedStr != null) meta.setDate(Long.parseLong(child.modifiedStr));
-                        } catch (NumberFormatException ignored) {}
-                        found.add(meta);
-
+                        FileMeta meta = child.book();
+                        String relativePath = relativeFolder.isEmpty() ? child.name : relativeFolder + "/" + child.name;
+                        if (index != null) index.file(relativePath, meta);
                         Uri opfUri = findCalibreOpf(child.name, siblingByLowerName);
+                        SafOpfRegistry.Entry previous = SafOpfRegistry.get(child.uri.toString());
                         if (opfUri != null) {
+                            String revision = index == null ? "" : index.revision(relativePath);
+                            if (revision.isEmpty()) revision = sidecarRevision(children);
+                            if (previous == null || !revision.equals(previous.revision)
+                                    || !opfUri.equals(previous.opfUri)) {
+                                changedCalibrePaths.add(meta.getPath());
+                            }
                             SafOpfRegistry.register(child.uri.toString(),
-                                    new SafOpfRegistry.Entry(opfUri, siblingByLowerName));
+                                    new SafOpfRegistry.Entry(opfUri, siblingByLowerName, revision));
+                        } else if (previous != null) {
+                            SafOpfRegistry.unregister(child.uri.toString());
+                            changedCalibrePaths.add(meta.getPath());
                         }
+                        found.add(meta);
+                        publishNewSafBook(meta);
                     }
                 }
                 if (!subtasks.isEmpty()) {
                     invokeAll(subtasks);
                 }
             } catch (Exception e) {
+                failed.set(true);
                 LOG.e(e);
             }
         }
@@ -548,6 +566,19 @@ public class SearchAllBooksWorker extends MessageWorker {
                 ExtUtils.getFileNameWithoutExt(bookName).toLowerCase(Locale.US) + ".opf");
         if (byBaseName != null) return byBaseName;
         return siblingByLowerName.get("metadata.opf");
+    }
+
+    private static String sidecarRevision(List<SafDocuments.Document> children) {
+        List<String> revisions = new ArrayList<>();
+        for (SafDocuments.Document document : children) {
+            if (document.directory || document.name == null) continue;
+            String name = document.name.toLowerCase(Locale.US);
+            if (name.endsWith(".opf") || name.endsWith(".jpg") || name.endsWith(".jpeg")
+                    || name.endsWith(".png")) {
+                revisions.add(SidecarRevision.file(name, document.size, document.modified));
+            }
+        }
+        return SidecarRevision.combine(revisions);
     }
 
 
@@ -564,7 +595,6 @@ public class SearchAllBooksWorker extends MessageWorker {
                 }
             }
             AppDB.get().updateAll(itemsMeta);
-            sendFinishMessage();
             LOG.d("updateBookAnnotations end");
         }
 
@@ -574,8 +604,14 @@ public class SearchAllBooksWorker extends MessageWorker {
 
         @Override
         public void run() {
+            if (isStopped()) return;
             LOG.d("timer 2");
             sendProggressMessage(itemsMeta);
+            long now = SystemClock.elapsedRealtime();
+            if (now - lastLibraryPublish >= 500 && discoveriesPublished.getAndSet(false)) {
+                lastLibraryPublish = now;
+                sendLibraryUpdated();
+            }
             handler.postDelayed(timer, 250);
         }
     };
@@ -585,6 +621,7 @@ public class SearchAllBooksWorker extends MessageWorker {
 
         @Override
         public void run() {
+            if (isStopped()) return;
             LOG.d("timer2");
             sendBuildingLibrary();
             handler.postDelayed(refreshTimer, 500);

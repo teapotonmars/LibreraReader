@@ -3,6 +3,8 @@ package org.ebookdroid.droids;
 import com.foobnix.android.utils.LOG;
 import com.foobnix.ext.CacheZipUtils;
 import com.foobnix.ext.EpubExtractor;
+import com.foobnix.ext.EpubProcessingSettings;
+import com.foobnix.pdf.info.SafCacheFiles;
 import com.foobnix.model.AppSP;
 import com.foobnix.model.AppState;
 import com.foobnix.pdf.info.AppsConfig;
@@ -22,13 +24,12 @@ import org.ebookdroid.droids.mupdf.codec.PdfContext;
 import java.io.File;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+
 
 public class
 EpubContext extends PdfContext {
 
     private static final String TAG = "EpubContext";
-    private static final Map<String, File> SAF_PROCESSING_TARGETS = new ConcurrentHashMap<>();
     File cacheFile;
 
     public static boolean isProcessingEnabled() {
@@ -64,22 +65,13 @@ EpubContext extends PdfContext {
     }
 
     public static String processingSettingsKey() {
-        return AppState.get().isReferenceMode + "|" +
-                AppState.get().isShowPageNumbers + "|" +
-                AppState.get().isShowFooterNotesInText + "|" +
-                AppState.get().fullScreenMode + "|" +
-                BookCSS.get().documentStyle + "|" +
-                BookCSS.get().isAutoHypens + "|" +
-                AppState.get().isBionicMode + "|" +
-                AppSP.get().hypenLang + "|" +
-                AppState.get().enableImageScale + "|" +
-                AppState.get().textReplacementHash + "|" +
-                BookCSS.get().isEnableBBCode + "|" +
-                AppState.get().isExperimental;
+        return EpubProcessingSettings.key();
     }
 
-    public static void registerSafProcessing(File sourceFile, File processedFile) {
-        SAF_PROCESSING_TARGETS.put(sourceFile.getAbsolutePath(), processedFile);
+    private static boolean isSafSource(String name) {
+        File file = new File(name);
+        return file.getName().startsWith("source-") && file.getParentFile() != null
+                && "saf-open".equals(file.getParentFile().getName());
     }
 
     private static boolean isProcessedSafEpub(String fileName) {
@@ -91,50 +83,69 @@ EpubContext extends PdfContext {
     @Override
     public File getCacheFileName(String fileNameOriginal) {
         LOG.d(TAG, "getCacheFileName", fileNameOriginal, AppSP.get().hypenLang);
-        cacheFile = new File(CacheZipUtils.CACHE_BOOK_DIR, (fileNameOriginal + processingSettingsKey())
-                .hashCode() + ".epub");
+        if (isSafSource(fileNameOriginal)) {
+            try {
+                byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                        .digest((fileNameOriginal + processingSettingsKey()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                StringBuilder key = new StringBuilder();
+                for (byte value : digest) key.append(String.format(Locale.ROOT, "%02x", value & 255));
+                cacheFile = new File(new File(fileNameOriginal).getParentFile(), "processed-" + key + ".epub");
+            } catch (java.security.NoSuchAlgorithmException impossible) {
+                throw new IllegalStateException(impossible);
+            }
+        } else {
+            cacheFile = new File(CacheZipUtils.CACHE_BOOK_DIR, (fileNameOriginal + processingSettingsKey())
+                    .hashCode() + ".epub");
+        }
         return cacheFile;
     }
 
     @Override
     public CodecDocument openDocumentInner(final String fileName, String password) {
-        LOG.d(TAG, fileName);
-
-        final boolean alreadyProcessedSafEpub = isProcessedSafEpub(fileName);
-        final File safProcessingTarget = SAF_PROCESSING_TARGETS.remove(new File(fileName).getAbsolutePath());
-        if (alreadyProcessedSafEpub) {
-            cacheFile = new File(fileName);
-        } else if (safProcessingTarget != null) {
-            cacheFile = safProcessingTarget;
+        try (EpubProcessingSettings.Scope settings = EpubProcessingSettings.capture();
+             AutoCloseable sourceLease = SafCacheFiles.acquire(new File(fileName))) {
+            SafCacheFiles.cancelReservation(new File(fileName));
+            cacheFile = isProcessedSafEpub(fileName) ? new File(fileName) : getCacheFileName(fileName);
+            try (AutoCloseable outputLease = SafCacheFiles.acquire(cacheFile)) {
+                return openCapturedDocument(fileName, password);
+            }
+        } catch (RuntimeException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new RuntimeException("Cannot open EPUB", failure);
         }
+    }
 
+    private CodecDocument openCapturedDocument(String fileName, String password) {
+        final boolean alreadyProcessedSafEpub = isProcessedSafEpub(fileName);
+        final File safProcessingTarget = isSafSource(fileName) ? cacheFile : null;
         Map<String, String> notes = null;
-        if (AppState.get().isShowFooterNotesInText) {
+        if (EpubProcessingSettings.isShowFooterNotesInText()) {
             notes = getNotes(fileName);
             LOG.d("footer-notes-extracted");
         }
-        if (cacheFile == null) {
-            cacheFile = getCacheFileName(fileName);
-        }
-
-        if (isProcessingEnabled() && !alreadyProcessedSafEpub && !cacheFile.isFile()) {
+        if (EpubProcessingSettings.enabled() && !alreadyProcessedSafEpub && !cacheFile.isFile()) {
             if (safProcessingTarget != null) {
-                File tempFile = new File(safProcessingTarget.getPath() + ".part");
-                tempFile.delete();
-                EpubExtractor.proccessHypens(fileName, tempFile.getPath(), notes);
+                File tempFile = null;
                 try {
+                    tempFile = SafCacheFiles.temporary(safProcessingTarget.getParentFile(), "epub-process-");
+                    EpubExtractor.proccessHypensApache(fileName, tempFile.getPath(), notes);
+                    if (TempHolder.get().loadingCancelled.get()) {
+                        throw new java.io.IOException("SAF EPUB processing cancelled");
+                    }
                     ExtUtils.publishSafProcessed(new File(fileName), tempFile, safProcessingTarget);
                 } catch (Exception e) {
                     LOG.e(e);
                     cacheFile = new File(fileName);
+                } finally {
+                    if (tempFile != null) tempFile.delete();
                 }
             } else {
                 EpubExtractor.proccessHypens(fileName, cacheFile.getPath(), notes);
             }
         }
-        }
 
-        final String bookPath = (isProcessingEnabled() || alreadyProcessedSafEpub) ? cacheFile.getPath() : fileName;
+        final String bookPath = (EpubProcessingSettings.enabled() || alreadyProcessedSafEpub) ? cacheFile.getPath() : fileName;
 
         if (AppsConfig.IS_LOG) {//accelerate open books
             File out = new File(cacheFile.getPath() + "-source");
@@ -154,12 +165,14 @@ EpubContext extends PdfContext {
         }
 
         final MuPdfDocument muPdfDocument = new MuPdfDocument(this, MuPdfDocument.FORMAT_PDF, bookPath, password);
+        muPdfDocument.retainCacheSource(new File(fileName));
         muPdfDocument.cacheFilename = bookPath;
 
         if (notes != null) {
             muPdfDocument.setFootNotes(notes);
         }
 
+        AutoCloseable metadataLease = SafCacheFiles.acquire(new File(bookPath));
         Thread t = new Thread("@T openDocument") {
             @Override
             public void run() {
@@ -173,6 +186,8 @@ EpubContext extends PdfContext {
                     removeTempFilesIfCancel();
                 } catch (Throwable e) {
                     LOG.e(e);
+                } finally {
+                    try { metadataLease.close(); } catch (Exception e) { LOG.e(e); }
                 }
             }
 
