@@ -5,6 +5,7 @@ import static com.foobnix.pdf.info.AppsConfig.WORKER_POLICY;
 
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -129,6 +130,11 @@ public class SearchAllBooksWorker extends MessageWorker {
             AppProfile.init(getApplicationContext());
             if (!ScanOwnership.write(scanGeneration, this::isStopped,
                     AppDB.get()::migrateAllSafRows)) return false;
+            String metadataSettings = MetadataRefreshPolicy.settingsKey();
+            SharedPreferences metadataPreferences = getApplicationContext()
+                    .getSharedPreferences("ScanMetadataRevisions", Context.MODE_PRIVATE);
+            String profileKey = AppProfile.getCurrent() + "|";
+            Map<String, String> appliedRevisions = new HashMap<>();
             ImageExtractor.clearErrors();
             itemsMeta = java.util.Collections.synchronizedList(new LinkedList<>());
             SafOpfRegistry.restore(getApplicationContext());
@@ -212,12 +218,29 @@ public class SearchAllBooksWorker extends MessageWorker {
                 }
                 if (ExtUtils.isExteralSD(found.getPath()) && baseline.getState() == null)
                     baseline.setState(FileMetaCore.STATE_BASIC);
+                String revision = MetadataRefreshPolicy.revision(found,
+                        sidecars.get(found.getPath()), metadataSettings);
+                String revisionKey = profileKey + found.getPath();
+                if (metadataSettings.equals(MetadataRefreshPolicy.settingsKey())
+                        && !MetadataRefreshPolicy.needsExtraction(baseline,
+                                metadataPreferences.getString(revisionKey, null), revision)) continue;
+                boolean[] extracted = new boolean[1];
                 if (ExtUtils.isExteralSD(found.getPath())) {
                     if (!publishSafMetadata(found, baseline, sidecars.get(found.getPath()),
-                            scanGeneration, this::isStopped)) return false;
+                            scanGeneration, this::isStopped, extracted)) return false;
                 } else if (!publishLocalMetadata(found, baseline,
-                        scanGeneration, this::isStopped)) return false;
+                        scanGeneration, this::isStopped, extracted)) return false;
+                if (revision != null && extracted[0])
+                    appliedRevisions.put(revisionKey, revision);
             }
+            if (!ScanOwnership.write(scanGeneration, this::isStopped, () -> {
+                if (metadataSettings.equals(MetadataRefreshPolicy.settingsKey())) {
+                    SharedPreferences.Editor editor = metadataPreferences.edit();
+                    for (Map.Entry<String, String> revision : appliedRevisions.entrySet())
+                        editor.putString(revision.getKey(), revision.getValue());
+                    editor.commit();
+                }
+            })) return false;
             itemsMeta.clear();
             handler.removeCallbacks(refreshTimer);
             CacheZipUtils.CacheDir.ZipService.removeCacheContent();
@@ -236,6 +259,12 @@ public class SearchAllBooksWorker extends MessageWorker {
 
     boolean publishLocalMetadata(FileMeta found, FileMeta baseline, long owner,
                                  java.util.function.BooleanSupplier stopped) {
+        return publishLocalMetadata(found, baseline, owner, stopped, new boolean[1]);
+    }
+
+    boolean publishLocalMetadata(FileMeta found, FileMeta baseline, long owner,
+                                 java.util.function.BooleanSupplier stopped,
+                                 boolean[] extractionSucceededResult) {
         FileMeta extracted = new FileMeta(found.getPath());
         File file = new File(found.getPath());
         FileMetaCore.get().upadteBasicMeta(extracted, file);
@@ -246,8 +275,10 @@ public class SearchAllBooksWorker extends MessageWorker {
             extractionSucceeded = true;
         } catch (Exception failure) { LOG.e(failure); }
         boolean completed = extractionSucceeded;
-        return ScanOwnership.write(owner, stopped,
+        boolean published = ScanOwnership.write(owner, stopped,
                 () -> AppDB.get().updateScannedMetadata(extracted, baseline, completed));
+        extractionSucceededResult[0] = published && completed;
+        return published;
     }
 
     boolean publishSafMetadata(FileMeta found, FileMeta baseline, long owner,
@@ -257,6 +288,12 @@ public class SearchAllBooksWorker extends MessageWorker {
 
     boolean publishSafMetadata(FileMeta found, FileMeta baseline, SafOpfRegistry.Entry sidecar,
                                long owner, java.util.function.BooleanSupplier stopped) {
+        return publishSafMetadata(found, baseline, sidecar, owner, stopped, new boolean[1]);
+    }
+
+    boolean publishSafMetadata(FileMeta found, FileMeta baseline, SafOpfRegistry.Entry sidecar,
+                               long owner, java.util.function.BooleanSupplier stopped,
+                               boolean[] extractionSucceededResult) {
         FileMeta extracted = new FileMeta(found.getPath());
         extracted.setTitle(found.getTitle());
         extracted.setPathTxt(found.getPathTxt());
@@ -273,8 +310,10 @@ public class SearchAllBooksWorker extends MessageWorker {
             extractionSucceeded = true;
         } catch (Exception failure) { LOG.e(failure); }
         boolean completed = extractionSucceeded;
-        return ScanOwnership.write(owner, stopped,
+        boolean published = ScanOwnership.write(owner, stopped,
                 () -> AppDB.get().updateScannedMetadata(extracted, baseline, completed));
+        extractionSucceededResult[0] = published && completed;
+        return published;
     }
 
     protected EbookMeta readSafMetadataForScan(FileMeta found) throws Exception {
