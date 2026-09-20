@@ -12,6 +12,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.ArrayList;
+import java.util.List;
 import android.system.ErrnoException;
 import android.system.Os;
 
@@ -44,6 +46,9 @@ public final class BookCacheLeases {
     public static void scheduleCleanup(Runnable work) { CLEANUP.execute(work); }
 
     private static final Set<String> initializedFolders = new HashSet<>();
+
+
+
 
     /** Crash leftovers only: ordinary cache outputs and active leases remain untouched. */
     public static void sweepAbandoned(File directory) {
@@ -137,6 +142,7 @@ public final class BookCacheLeases {
 
 
 
+
     public static synchronized AutoCloseable acquire(File file) {
         add(leases, file);
         return new AutoCloseable() {
@@ -147,6 +153,31 @@ public final class BookCacheLeases {
                 }
             }
         };
+    }
+
+    /** Acquire before starting a background path reader, including its failure-to-start case. */
+    public static Thread startLeasedThread(String name, int priority, Runnable work, File... files) {
+        List<AutoCloseable> held = new ArrayList<>(files.length);
+        for (File file : files) held.add(acquire(file));
+        Thread thread = new Thread(() -> {
+            try {
+                work.run();
+            } finally {
+                for (AutoCloseable lease : held) {
+                    try { lease.close(); } catch (Exception ignored) { }
+                }
+            }
+        }, name);
+        try {
+            thread.setPriority(priority);
+            thread.start();
+            return thread;
+        } catch (RuntimeException | Error failure) {
+            for (AutoCloseable lease : held) {
+                try { lease.close(); } catch (Exception ignored) { }
+            }
+            throw failure;
+        }
     }
 
     public static synchronized void readerOpened(File file) { add(leases, file); }
