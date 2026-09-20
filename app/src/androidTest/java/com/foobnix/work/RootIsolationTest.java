@@ -98,7 +98,8 @@ public class RootIsolationTest {
             SearchAllBooksWorker worker = new SearchAllBooksWorker(context, parameters()) {
                 @Override protected void scanSafRoot(String rootPath, List<FileMeta> output,
                         java.util.Map<String, com.foobnix.pdf.info.SafOpfRegistry.Entry> sidecars,
-                        List<com.foobnix.model.SimpleMeta> excluded, List<FileMeta> synced) {
+                        List<com.foobnix.model.SimpleMeta> excluded, List<FileMeta> synced,
+                        java.util.Set<String> forced, java.util.Map<String, String> manifests) {
                     FileMeta discovered = new FileMeta(book);
                     discovered.setTitle("Book.epub"); discovered.setSize(100L); discovered.setDate(1000L);
                     output.add(discovered);
