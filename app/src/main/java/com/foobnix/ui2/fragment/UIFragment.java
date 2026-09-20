@@ -35,7 +35,6 @@ import com.bumptech.glide.RequestBuilder;
 import com.bumptech.glide.integration.recyclerview.RecyclerViewPreloader;
 import com.bumptech.glide.util.FixedPreloadSizeProvider;
 import com.foobnix.LibreraApp;
-import com.foobnix.android.utils.Apps;
 import com.foobnix.android.utils.Dips;
 import com.foobnix.android.utils.LOG;
 import com.foobnix.android.utils.TxtUtils;
@@ -114,6 +113,7 @@ public abstract class UIFragment<T> extends Fragment {
     @Override
     public void onViewCreated(View view, Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
+        if (populateAgain) populate();
 
         //TxtUtils.updateAllLinks(view);
         if (AppState.get().appTheme == AppState.THEME_INK) {
@@ -513,6 +513,9 @@ public abstract class UIFragment<T> extends Fragment {
 
     @Override
     public void onDestroyView() {
+        populateGeneration++;
+        populateAgain = true;
+        handler.removeCallbacks(showProgress);
         detachCoverPreloader();
         super.onDestroyView();
     }
@@ -539,64 +542,54 @@ public abstract class UIFragment<T> extends Fragment {
         return MyProgressBar != null && MyProgressBar.getVisibility() == View.VISIBLE;
     }
 
+    private boolean populateAgain;
+    private int populateGeneration;
+    private final Runnable showProgress = () -> {
+        if (inProgress && MyProgressBar != null) MyProgressBar.setVisibility(View.VISIBLE);
+    };
+
     public void populate() {
-        if (inProgress) {
-            LOG.d("IN_PROGRESS");
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            handler.post(this::populate);
             return;
         }
-
-        final Runnable target = () -> {
-
-            if (getActivity() == null) {
-                return;
-            }
-
-            getActivity().runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    if (MyProgressBar != null) {
-                        handler.postDelayed(new Runnable() {
-
-                            @Override
-                            public void run() {
-                                MyProgressBar.setVisibility(View.VISIBLE);
-                            }
-                        }, 100);
-                    }
-                }
-            });
-
-            final List<T> result;
+        if (inProgress) {
+            populateAgain = true;
+            return;
+        }
+        if (!isAdded() || getView() == null) {
+            populateAgain = true;
+            return;
+        }
+        final int generation = ++populateGeneration;
+        inProgress = true;
+        populateAgain = false;
+        handler.postDelayed(showProgress, 100);
+        AppsConfig.executorService.submit(() -> {
+            List<T> result = null;
+            boolean succeeded = false;
             try {
-                inProgress = true;
                 result = prepareDataInBackgroundSync();
-            } finally {
+                succeeded = true;
+            } catch (Exception failure) {
+                LOG.e(failure);
+            }
+            final List<T> prepared = result;
+            final boolean ready = succeeded;
+            handler.post(() -> {
                 inProgress = false;
-
-            }
-            if (isDetached() || Apps.isDestroyedActivity(getActivity())) {
-                return;
-            }
-
-            getActivity().runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    if (isAdded()) {
-                        if (MyProgressBar != null) {
-                            handler.removeCallbacksAndMessages(null);
-                            MyProgressBar.setVisibility(View.GONE);
-                        }
-                        try {
-                            populateDataInUI(result);
-                        } catch (Exception e) {
-                            LOG.e(e);
-                        }
+                handler.removeCallbacks(showProgress);
+                if (MyProgressBar != null) MyProgressBar.setVisibility(View.GONE);
+                if (isAdded() && getView() != null && ready && !populateAgain && generation == populateGeneration) {
+                    try {
+                        populateDataInUI(prepared);
+                    } catch (Exception failure) {
+                        LOG.e(failure);
                     }
-
                 }
+                if (populateAgain) populate();
             });
-        };
-        AppsConfig.executorService.submit(target);
+        });
     }
 
     public void onGridList(int mode,
