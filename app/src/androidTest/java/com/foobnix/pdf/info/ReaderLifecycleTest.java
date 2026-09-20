@@ -24,6 +24,8 @@ public class ReaderLifecycleTest {
     private String original, priorPath, priorOriginal;
     private boolean priorCancellation;
     private AppBook priorSettings;
+    private int priorTtsParagraph;
+    private int priorTtsPage;
     private Controller controller;
     private static class Controller extends VerticalModeController {
         int page = 1;
@@ -36,6 +38,7 @@ public class ReaderLifecycleTest {
     @Before public void setUp() {
         AppProfile.init(InstrumentationRegistry.getInstrumentation().getTargetContext());
         priorPath = AppSP.get().lastBookPath; priorOriginal = AppSP.get().lastBookOriginalUri;
+        priorTtsParagraph = AppSP.get().lastBookParagraph; priorTtsPage = AppSP.get().tempBookPage;
         priorCancellation = TempHolder.get().loadingCancelled.get(); priorSettings = SettingsManager.getBookSettings();
         original = "content://reader-lifecycle/document/" + UUID.randomUUID();
         FileMeta meta = AppDB.get().getOrCreate(original); meta.setTitle("Fluent Python"); meta.setPathTxt("Fluent Python.pdf"); AppDB.get().save(meta);
@@ -48,6 +51,7 @@ public class ReaderLifecycleTest {
     @After public void tearDown() {
         SharedBooks.cache.remove(original); AppDB.get().deleteBy(original);
         AppSP.get().lastBookPath = priorPath; AppSP.get().lastBookOriginalUri = priorOriginal;
+        AppSP.get().lastBookParagraph = priorTtsParagraph; AppSP.get().tempBookPage = priorTtsPage;
         TempHolder.get().loadingCancelled.set(priorCancellation);
         if (priorSettings != null) SettingsManager.getBookSettings(priorSettings.path);
     }
@@ -77,5 +81,16 @@ public class ReaderLifecycleTest {
             controller.getActivity().setIntent(new Intent()); controller.setCurrentBook(new File("/fixture/Local.pdf"));
         });
         assertNull(AppSP.get().lastBookOriginalUri); assertEquals("/fixture/Local.pdf", controller.getBookIdentity());
+    }
+    @Test public void switchingBooksClearsOldTtsParagraph() {
+        AppSP.get().lastBookParagraph = 7;
+        AppSP.get().tempBookPage = 12;
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() ->
+                controller.setCurrentBook(new File("/fixture/source-version-1.pdf")));
+        assertEquals(7, AppSP.get().lastBookParagraph);
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() ->
+                controller.setCurrentBook(new File("/fixture/source-version-2.pdf")));
+        assertEquals(0, AppSP.get().lastBookParagraph);
+        assertEquals(-1, AppSP.get().tempBookPage);
     }
 }

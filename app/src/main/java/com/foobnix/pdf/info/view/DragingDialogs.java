@@ -3303,7 +3303,7 @@ public class DragingDialogs {
                     @Override public void onClick(View v) {
                         PageImageState.get().isShowCuttingLine = false;
                         AppSP.get().isCut = false;
-                        AppBook bookSettings = SettingsManager.getBookSettings(controller.getCurrentBook().getPath());
+                        AppBook bookSettings = SettingsManager.getBookSettings(controller.getBookIdentity());
                         boolean wasSplit = bookSettings.sp;
                         bookSettings.sp = false;
                         onRefreshDoc.run();

@@ -59,6 +59,7 @@ import org.ebookdroid.common.settings.SettingsManager;
 import com.foobnix.model.AppProfile;
 import com.foobnix.model.AppSP;
 import com.foobnix.model.AppState;
+import com.foobnix.pdf.info.AppsConfig;
 import com.foobnix.pdf.info.R;
 import com.foobnix.pdf.info.model.BookCSS;
 import com.foobnix.pdf.info.wrapper.DocumentController;
@@ -1168,17 +1169,13 @@ import java.util.List;
 
             final String progressBook = bookIdentity();
             final int progressPageCount = AppSP.get().lastBookPageCount;
-            new Thread(() -> {
-                try {
-                    Thread.sleep(500);
-                } catch (InterruptedException e) {
-                }
+            AppsConfig.executorServiceSingle.execute(() -> {
                 AppBook load = SharedBooks.load(progressBook);
                 load.currentPageChanged(pageNumber + 1, progressPageCount);
 
                 SharedBooks.saveAsync(load);
                 AppProfile.save(this);
-            }, "@T TTS Save").start();
+            });
         }
     }
 

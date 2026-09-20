@@ -1110,9 +1110,15 @@ public abstract class DocumentController {
     }
 
     public void setCurrentBook(final File currentBook) {
+        String originalUri = activity.getIntent().getStringExtra("SAF_ORIGINAL_URI");
+        if (!currentBook.getPath().equals(AppSP.get().lastBookPath)
+                || !java.util.Objects.equals(originalUri, AppSP.get().lastBookOriginalUri)) {
+            AppSP.get().lastBookParagraph = 0;
+            AppSP.get().tempBookPage = -1;
+        }
         this.currentBook = currentBook;
         AppSP.get().lastBookPath = currentBook.getPath();
-        AppSP.get().lastBookOriginalUri = activity.getIntent().getStringExtra("SAF_ORIGINAL_URI");
+        AppSP.get().lastBookOriginalUri = originalUri;
         TempHolder.get().loadingCancelled.set(false);
         LOG.d("setCurrentBook",currentBook);
     }
