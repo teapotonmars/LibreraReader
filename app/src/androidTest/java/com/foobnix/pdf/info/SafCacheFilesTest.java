@@ -68,12 +68,13 @@ public class SafCacheFilesTest {
             assertArrayEquals(new byte[]{2,3}, Files.readAllBytes(output.toPath()));
         } finally { output.delete(); dir.delete(); }
     }
-    @Test public void replacementIsCompleteAndDoesNotEvictAnActiveOutput() throws Exception {
+    @Test public void activeOutputCannotBeReplacedThroughItsPathname() throws Exception {
         File dir = directory(), output = new File(dir, "processed.epub"), partial = new File(dir, "output.part");
         Files.write(output.toPath(), new byte[]{1}); Files.write(partial.toPath(), new byte[]{2,3});
         try (AutoCloseable lease = SafCacheFiles.acquire(output)) {
-            SafCacheFiles.publish(partial, output);
-            assertArrayEquals(new byte[]{2,3}, Files.readAllBytes(output.toPath()));
+            assertThrows(java.io.IOException.class, () -> SafCacheFiles.publish(partial, output));
+            assertArrayEquals(new byte[]{1}, Files.readAllBytes(output.toPath()));
+            assertArrayEquals(new byte[]{2,3}, Files.readAllBytes(partial.toPath()));
             assertFalse(SafCacheFiles.evict(output));
         } finally { output.delete(); partial.delete(); dir.delete(); }
     }

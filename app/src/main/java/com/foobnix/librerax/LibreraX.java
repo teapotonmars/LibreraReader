@@ -36,6 +36,7 @@ public class LibreraX {
     // the book's bookmarks as a JSON array of {text, p, pt, t}: listed in LibreraX and found
     // there by percent and page text, never saved or drawn there
     public static final String EXTRA_BOOKMARKS = "librera.bookmarks";
+    public static final String EXTRA_BOOK_IDENTITY = "librera.bookIdentity";
 
     // the activity a book is opened with in the current reading mode, for widgets and shortcuts
     public static Class<?> readerClass() {
@@ -55,8 +56,13 @@ public class LibreraX {
 
     // percent > 0 opens the book at that place (a bookmark), else where it was left
     public static void open(Context c, Uri uri, float percent, String pageText) {
+        open(c, uri, percent, pageText, null);
+    }
+
+    public static void open(Context c, Uri uri, float percent, String pageText, String identity) {
         final Intent intent = new Intent(c, LibreraXActivity.class);
         intent.setData(uri);
+        if (identity != null) intent.putExtra(EXTRA_BOOK_IDENTITY, identity);
         if (percent > 0f) {
             intent.putExtra(EXTRA_PERCENT, percent);
             intent.putExtra(EXTRA_PAGE_TEXT, pageText);

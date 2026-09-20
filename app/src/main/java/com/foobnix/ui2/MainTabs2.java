@@ -656,7 +656,8 @@ public class MainTabs2 extends AdsFragmentActivity {
             }
 
             try {
-                AppBook book = SharedBooks.load(AppSP.get().lastBookPath);
+                AppBook book = SharedBooks.load(TxtUtils.isNotEmpty(AppSP.get().lastBookOriginalUri)
+                        ? AppSP.get().lastBookOriginalUri : AppSP.get().lastBookPath);
                 if (book.p > 0.9999) {
                     LOG.d("Open Last book skipped", book.p);
                     Toast.makeText(MainTabs2.this, R.string.the_book_is_complete, Toast.LENGTH_LONG).show();
@@ -674,6 +675,9 @@ public class MainTabs2 extends AdsFragmentActivity {
                         new Intent(MainTabs2.this, isEasyMode ? HorizontalViewActivity.class : VerticalViewActivity.class);
                 intent.putExtra(PasswordDialog.EXTRA_APP_PASSWORD, getIntent().getStringExtra(PasswordDialog.EXTRA_APP_PASSWORD));
                 intent.setData(Uri.fromFile(new File(AppSP.get().lastBookPath)));
+                if (TxtUtils.isNotEmpty(AppSP.get().lastBookOriginalUri)) {
+                    intent.putExtra("SAF_ORIGINAL_URI", AppSP.get().lastBookOriginalUri);
+                }
                 startActivity(intent);
             });
         }

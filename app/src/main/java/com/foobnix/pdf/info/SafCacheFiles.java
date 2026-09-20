@@ -245,6 +245,9 @@ public final class SafCacheFiles {
 
     /** Atomic replacement never removes the previous good file before publication succeeds. */
     public static synchronized void publish(File temporary, File destination) throws IOException {
+        if (isProtected(destination)) {
+            throw new IOException("Cannot replace an active cache file: " + destination);
+        }
         try {
             Os.rename(temporary.getAbsolutePath(), destination.getAbsolutePath());
         } catch (ErrnoException failure) {

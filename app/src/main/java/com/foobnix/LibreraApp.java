@@ -21,6 +21,7 @@ import com.foobnix.ext.CacheZipUtils;
 import com.foobnix.hypen.HypenUtils;
 import com.foobnix.pdf.info.ADS;
 import com.foobnix.pdf.info.AppsConfig;
+import com.foobnix.pdf.info.ExtUtils;
 import com.foobnix.pdf.info.IMG;
 import com.foobnix.pdf.info.Prefs;
 import com.foobnix.pdf.info.TintUtil;
@@ -77,6 +78,7 @@ public class LibreraApp extends Application {
 
 
         AppsConfig.init(this);
+        AppsConfig.executorServiceSingle.execute(() -> ExtUtils.pruneDurableHandoffs(this));
         Dips.init(this);
         Prefs.get().init(this);
 
