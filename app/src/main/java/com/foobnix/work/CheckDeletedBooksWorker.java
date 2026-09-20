@@ -118,7 +118,8 @@ public class CheckDeletedBooksWorker extends MessageWorker {
         Clouds.get().syncronizeGet();
         if (isStopped()) return false;
         Tags2.updateTagsDB();
-        return ScanOwnership.isCurrent(owner, this::isStopped);
+        return ScanOwnership.write(owner, this::isStopped,
+                () -> CoverWarmupWorker.run(getApplicationContext()));
     }
 
     static boolean reconcileFound(long owner, java.util.function.BooleanSupplier stopped,

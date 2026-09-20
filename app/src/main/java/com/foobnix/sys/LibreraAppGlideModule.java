@@ -185,7 +185,9 @@ public class LibreraAppGlideModule extends AppGlideModule {
 //        builder.setDiskCache(new DiskLruCacheFactory(f.getPath(), diskCacheSizeBytes));
 
 
-        int coverThreads = 1;
+        // Warmup can occupy one source worker while a visible or preloaded cover
+        // uses the other. A single worker made scrolling wait behind extraction.
+        int coverThreads = 2;
         builder.setSourceExecutor(
                 newSourceBuilder()
 
