@@ -79,4 +79,25 @@ public class SafDiscoveryConcurrencyTest {
             if (addedExtension) ExtUtils.seachExts.remove(".epub");
         }
     }
+
+    @Test public void confirmedBatchesCanRemainAfterLaterFolderFailure() throws Exception {
+        List<FileMeta> completeOutput = new ArrayList<>();
+        Map<String, SafOpfRegistry.Entry> sidecars = new HashMap<>();
+        List<FileMeta> published = new ArrayList<>();
+        boolean addedExtension = !ExtUtils.seachExts.contains(".epub");
+        if (addedExtension) ExtUtils.seachExts.add(".epub");
+        try {
+            assertThrows(IOException.class, () -> SafDiscovery.collect(root, completeOutput,
+                    sidecars, () -> false, (uri, stopped) -> {
+                        if (uri.equals(root)) return Arrays.asList(
+                                book("found.epub", Uri.withAppendedPath(root, "found")),
+                                folder("first", first));
+                        throw new IOException("Provider offline");
+                    }, (batch, entries) -> published.addAll(batch)));
+            assertEquals(1, published.size());
+            assertTrue(completeOutput.isEmpty());
+        } finally {
+            if (addedExtension) ExtUtils.seachExts.remove(".epub");
+        }
+    }
 }

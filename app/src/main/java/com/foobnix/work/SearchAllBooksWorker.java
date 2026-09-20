@@ -141,6 +141,8 @@ public class SearchAllBooksWorker extends MessageWorker {
             Map<String, SafOpfRegistry.Entry> sidecars = new HashMap<>();
             Map<String, FileMeta> before = new HashMap<>();
             for (FileMeta row : AppDB.get().scanSnapshot()) before.put(row.getPath(), row);
+            List<SimpleMeta> excluded = AppData.get().getAllExcluded();
+            List<FileMeta> synced = AppData.get().getAllSyncBooks();
             Set<String> completedRoots = new HashSet<>();
             Map<String, Set<String>> safMembership = new HashMap<>();
             handler.post(timer);
@@ -148,8 +150,24 @@ public class SearchAllBooksWorker extends MessageWorker {
                 if (path == null || path.trim().isEmpty()) continue;
                 if (ExtUtils.isExteralSD(path)) {
                     List<FileMeta> fromRoot = new ArrayList<>();
-                    SafDiscovery.collect(getApplicationContext(), Uri.parse(path), fromRoot,
-                            sidecars, this::isStopped);
+                    try {
+                        SafDiscovery.collect(getApplicationContext(), Uri.parse(path), fromRoot,
+                                sidecars, this::isStopped, (batch, entries) -> {
+                                    if (!ScanMembership.apply(batch, excluded, synced, this::isStopped))
+                                        throw new IOException("SAF scan cancelled");
+                                    if (!ScanOwnership.write(scanGeneration, this::isStopped, () -> {
+                                        AppDB.get().publishDiscoveredBooks(path, batch);
+                                        for (FileMeta found : batch) {
+                                            SafOpfRegistry.Entry entry = entries.get(found.getPath());
+                                            if (entry != null) SafOpfRegistry.register(found.getPath(), entry);
+                                        }
+                                        sendScanBatch();
+                                    })) throw new IOException("SAF scan replaced");
+                                });
+                    } finally {
+                        ScanOwnership.write(scanGeneration, () -> false,
+                                () -> SafOpfRegistry.save(getApplicationContext()));
+                    }
                     itemsMeta.addAll(fromRoot);
                     Set<String> paths = new HashSet<>();
                     for (FileMeta row : fromRoot) paths.add(row.getPath());
@@ -187,8 +205,6 @@ public class SearchAllBooksWorker extends MessageWorker {
             for (FileMeta row : itemsMeta) unique.putIfAbsent(row.getPath(), row);
             itemsMeta.clear();
             itemsMeta.addAll(unique.values());
-            List<SimpleMeta> excluded = AppData.get().getAllExcluded();
-            List<FileMeta> synced = AppData.get().getAllSyncBooks();
             if (!ScanMembership.apply(itemsMeta, excluded, synced, this::isStopped)) return false;
             if (!ScanOwnership.write(scanGeneration, this::isStopped, () -> {
                 AppDB.get().reconcileCompletedScan(itemsMeta, completedRoots, safMembership);
