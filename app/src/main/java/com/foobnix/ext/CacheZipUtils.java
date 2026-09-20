@@ -10,6 +10,7 @@ import com.foobnix.android.utils.LOG;
 import com.foobnix.android.utils.TxtUtils;
 import com.foobnix.mobi.parser.IOUtils;
 import com.foobnix.pdf.info.ExtUtils;
+import com.foobnix.pdf.info.SafCacheFiles;
 import com.foobnix.pdf.info.wrapper.MagicHelper;
 import com.foobnix.sys.ArchiveEntry;
 import com.foobnix.sys.ZipArchiveInputStream;
@@ -102,7 +103,7 @@ public class CacheZipUtils {
             File[] files = CACHE_TEMP.listFiles();
             Arrays.sort(files, (f1, f2) -> Long.compare(f1.lastModified(), f2.lastModified()));
             if (files.length > 50) {
-                files[0].delete();
+                SafCacheFiles.evict(files[0]);
                 LOG.d("JavaCache save delete", files[0]);
             }
 
@@ -150,7 +151,7 @@ public class CacheZipUtils {
             }
             for (File file : files) {
                 if (file != null) {
-                    boolean result = file.delete();
+                    boolean result = SafCacheFiles.evict(file);
                     LOG.d("removeFile", file,result);
                 }
             }
@@ -173,7 +174,7 @@ public class CacheZipUtils {
 
                 if (file != null && !file.getName().startsWith(exept.getName())) {
                     if (file.isFile()) {
-                        file.delete();
+                        SafCacheFiles.evict(file);
                     }
                 }
             }
@@ -377,13 +378,7 @@ public class CacheZipUtils {
     }
 
     public static void deleteDir(File file) {
-        File[] contents = file.listFiles();
-        if (contents != null) {
-            for (File f : contents) {
-                deleteDir(f);
-            }
-        }
-        file.delete();
+        SafCacheFiles.evictTree(file);
     }
 
     public static void copyFile(File source, File dest) throws IOException {
