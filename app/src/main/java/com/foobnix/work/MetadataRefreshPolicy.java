@@ -22,6 +22,11 @@ final class MetadataRefreshPolicy {
     }
 
     static String revision(FileMeta found, SafOpfRegistry.Entry sidecar, String settings) {
+        return revision(found, sidecar, settings, null);
+    }
+
+    static String revision(FileMeta found, SafOpfRegistry.Entry sidecar, String settings,
+                           String calibreRevision) {
         Long size;
         Long modified;
         String opf = "none";
@@ -44,7 +49,8 @@ final class MetadataRefreshPolicy {
             }
         }
         if (size == null || size <= 0 || modified == null || modified <= 0) return null;
-        return settings + "|" + size + ":" + modified + "|" + opf;
+        String revision = settings + "|" + size + ":" + modified + "|" + opf;
+        return calibreRevision == null ? revision : revision + "|calibre:" + calibreRevision;
     }
 
     static boolean needsExtraction(FileMeta before, String previousRevision, String currentRevision) {
