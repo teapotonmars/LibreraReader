@@ -6,6 +6,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.ArrayList;
+import java.util.List;
 import android.system.ErrnoException;
 import android.system.Os;
 
@@ -14,6 +16,13 @@ public final class SafCacheFiles {
     private static final Map<String, Integer> leases = new HashMap<>();
     private static final Map<String, Integer> reservations = new HashMap<>();
     private static final Set<String> initializedFolders = new HashSet<>();
+    private static final ThreadLocal<Integer> managedOpenDepth = ThreadLocal.withInitial(() -> 0);
+
+    public static void beginManagedOpen() { managedOpenDepth.set(managedOpenDepth.get() + 1); }
+    public static void endManagedOpen() {
+        int depth = managedOpenDepth.get() - 1;
+        if (depth == 0) managedOpenDepth.remove(); else managedOpenDepth.set(depth);
+    }
 
     public static synchronized File temporary(File directory, String prefix) throws IOException {
         if (initializedFolders.add(key(directory))) {
@@ -35,6 +44,7 @@ public final class SafCacheFiles {
     /** Keeps a returned staging file alive until its reader opens it. */
     public static synchronized void reserve(File file) { add(reservations, file); }
     public static synchronized void cancelReservation(File file) { remove(reservations, file); }
+    public static synchronized boolean hasReservation(File file) { return reservations.containsKey(key(file)); }
 
     public static synchronized AutoCloseable acquire(File file) {
         add(leases, file);
@@ -48,12 +58,39 @@ public final class SafCacheFiles {
         };
     }
 
+    /** Acquire before starting a background path reader, including its failure-to-start case. */
+    public static Thread startLeasedThread(String name, int priority, Runnable work, File... files) {
+        List<AutoCloseable> held = new ArrayList<>(files.length);
+        for (File file : files) held.add(acquire(file));
+        Thread thread = new Thread(() -> {
+            try {
+                work.run();
+            } finally {
+                for (AutoCloseable lease : held) {
+                    try { lease.close(); } catch (Exception ignored) { }
+                }
+            }
+        }, name);
+        try {
+            thread.setPriority(priority);
+            thread.start();
+            return thread;
+        } catch (RuntimeException | Error failure) {
+            for (AutoCloseable lease : held) {
+                try { lease.close(); } catch (Exception ignored) { }
+            }
+            throw failure;
+        }
+    }
+
     public static synchronized void readerOpened(File file) {
         readerOpened(file, true);
     }
     public static synchronized void readerOpened(File file, boolean consumeReservation) {
         add(leases, file);
-        if (consumeReservation) remove(reservations, file);
+        // AbstractCodecContext owns the reservation for the whole conversion/delegation.
+        // Direct MuPdfDocument callers still consume their own reservation here.
+        if (consumeReservation && managedOpenDepth.get() == 0) remove(reservations, file);
     }
     public static synchronized void readerClosed(File file) { remove(leases, file); }
 
