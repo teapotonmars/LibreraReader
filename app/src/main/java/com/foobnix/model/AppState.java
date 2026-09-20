@@ -598,6 +598,7 @@ public class AppState {
     public boolean isAppPassword;
     public boolean isLoaded = false;
     public boolean isUseCalibreOpf = true;
+    public boolean isUseCalibreDatabaseForScan = false;
     public boolean isDisplayAnnotation = false;
     public boolean isMirrorImage = false;
     public boolean isBionicMode = false;

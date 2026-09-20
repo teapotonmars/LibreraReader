@@ -169,6 +169,7 @@ public class SearchAllBooksWorker extends MessageWorker {
             SafStateStore metadataPreferences = SafStateStore.get(getApplicationContext(), "ScanMetadataRevisions");
             SafStateStore failures = SafStateStore.get(getApplicationContext(), "ScanMetadataFailures");
             String profileKey = AppProfile.getCurrent() + "|";
+            Map<String, String> manifestRevisions = new HashMap<>();
             ImageExtractor.clearErrors();
             itemsMeta = java.util.Collections.synchronizedList(new LinkedList<>());
             SafOpfRegistry.restore(getApplicationContext());
@@ -179,6 +180,7 @@ public class SearchAllBooksWorker extends MessageWorker {
             List<FileMeta> synced = AppData.get().getAllSyncBooks();
             Set<String> completedRoots = new HashSet<>();
             Set<String> incompleteLocal = new HashSet<>();
+            Set<String> forcedMetadata = new HashSet<>();
             Map<String, Set<String>> safMembership = new HashMap<>();
             handler.post(timer);
             for (String path : JsonDB.get(BookCSS.get().searchPathsJson)) {
@@ -188,7 +190,8 @@ public class SearchAllBooksWorker extends MessageWorker {
                     List<FileMeta> fromRoot = new ArrayList<>();
                     Map<String, SafOpfRegistry.Entry> rootSidecars = new HashMap<>();
                     try {
-                        scanSafRoot(path, fromRoot, rootSidecars, excluded, synced);
+                        scanSafRoot(path, fromRoot, rootSidecars, excluded, synced,
+                                forcedMetadata, manifestRevisions);
                     } finally {
                         // Confirmed partial discoveries still deserve metadata, but never certify removal.
                         sidecars.putAll(rootSidecars);
@@ -282,9 +285,11 @@ public class SearchAllBooksWorker extends MessageWorker {
                 if (ExtUtils.isExteralSD(found.getPath()) && baseline.getState() == null)
                     baseline.setState(FileMetaCore.STATE_BASIC);
                 String revision = MetadataRefreshPolicy.revision(found,
-                        sidecars.get(found.getPath()), metadataSettings);
+                        sidecars.get(found.getPath()), metadataSettings,
+                        manifestRevisions.get(found.getPath()));
                 String revisionKey = profileKey + found.getPath();
-                if (metadataSettings.equals(MetadataRefreshPolicy.settingsKey())
+                if (!forcedMetadata.contains(found.getPath())
+                        && metadataSettings.equals(MetadataRefreshPolicy.settingsKey())
                         && !MetadataRefreshPolicy.needsExtraction(baseline,
                                 metadataPreferences.getString(revisionKey, null), revision)) continue;
                 if (!MetadataRefreshPolicy.retryDue(failures.getString(revisionKey, null), revision,
@@ -466,11 +471,66 @@ public class SearchAllBooksWorker extends MessageWorker {
 
     protected void scanSafRoot(String rootPath, List<FileMeta> output,
                              Map<String, SafOpfRegistry.Entry> sidecars,
-                             List<SimpleMeta> excluded, List<FileMeta> synced)
+                             List<SimpleMeta> excluded, List<FileMeta> synced,
+                             Set<String> forcedMetadata, Map<String, String> manifestRevisions)
             throws IOException, InterruptedException {
-        SafDiscovery.collect(getApplicationContext(), Uri.parse(rootPath), output,
-                sidecars, this::isStopped,
-                (batch, entries) -> publishSafBatch(rootPath, batch, entries, excluded, synced));
+        Uri root = Uri.parse(rootPath);
+        CalibreLibraryIndex index = null;
+        if (AppState.get().isUseCalibreDatabaseForScan) {
+            try {
+                index = CalibreLibraryIndex.open(getApplicationContext(), root, this::isStopped);
+            } catch (IOException unavailable) {
+                LOG.e(unavailable);
+                SafStateStore.get(getApplicationContext(), "CalibreDiscovery")
+                        .edit().remove(rootPath).commit();
+            }
+        }
+        if (index != null) {
+            try {
+                CalibreLibraryIndex cachedIndex = index;
+                List<FileMeta> cached = new ArrayList<>();
+                boolean reused = index.discoverCached(cached, found -> {
+                    try {
+                        publishSafBatch(rootPath, java.util.Collections.singletonList(found),
+                                cachedIndex.sidecars(), excluded, synced);
+                    } catch (IOException replaced) { throw new java.io.UncheckedIOException(replaced); }
+                });
+                if (reused) {
+                    sidecars.putAll(index.sidecarsWithUninspectedFallback(cached));
+                    publishSafBatch(rootPath, cached, sidecars, excluded, synced);
+                    output.addAll(cached);
+                    for (Map.Entry<String, Uri> author : index.foldersToCheck().entrySet())
+                        collectIndexedSafFolder(rootPath, author.getValue(), author.getKey(),
+                                output, sidecars, excluded, synced, index);
+                    forcedMetadata.addAll(index.changedPaths());
+                    manifestRevisions.putAll(index.metadataRevisions());
+                    if (!ScanOwnership.write(scanGeneration, this::isStopped, index::save))
+                        throw new IOException("SAF scan replaced");
+                    return;
+                }
+            } catch (IOException invalid) {
+                if (!ScanOwnership.isCurrent(scanGeneration, this::isStopped)) throw invalid;
+                LOG.e(invalid);
+                output.clear();
+                sidecars.clear();
+                index.resetForFullTraversal();
+            }
+        }
+        collectIndexedSafFolder(rootPath, root, "", output, sidecars, excluded, synced, index);
+        if (index != null) manifestRevisions.putAll(index.metadataRevisions());
+        if (index != null && !ScanOwnership.write(scanGeneration, this::isStopped, index::save))
+            throw new IOException("SAF scan replaced");
+    }
+
+    private void collectIndexedSafFolder(String rootPath, Uri folder, String relative,
+                                         List<FileMeta> output,
+                                         Map<String, SafOpfRegistry.Entry> sidecars,
+                                         List<SimpleMeta> excluded, List<FileMeta> synced,
+                                         CalibreLibraryIndex index)
+            throws IOException, InterruptedException {
+        CalibreIndexedDiscovery.collect(folder, relative, output, sidecars, this::isStopped,
+                (parent, stopped) -> SafDocuments.list(getApplicationContext(), parent, stopped),
+                index, (batch, entries) -> publishSafBatch(rootPath, batch, entries, excluded, synced));
     }
 
     protected EbookMeta readSafMetadataForScan(FileMeta found, SafOpfRegistry.Entry sidecar)
