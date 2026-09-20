@@ -8,6 +8,7 @@ import com.foobnix.android.utils.LOG;
 import com.foobnix.ext.CacheZipUtils;
 import com.foobnix.model.AppState;
 import com.foobnix.pdf.info.ExtUtils;
+import com.foobnix.pdf.info.SafCacheFiles;
 import com.foobnix.pdf.info.model.BookCSS;
 import com.foobnix.sys.TempHolder;
 
@@ -46,10 +47,16 @@ public class MuPdfDocument extends AbstractCodecDocument {
     private volatile List<String> mediaAttachment;
     private int pagesCount = -1;
     private String fname;
+    private AutoCloseable cacheSourceLease;
+
+    /** Keep converted output and its sibling resources until this document is recycled. */
+    public void retainCacheSource(File source) {
+        cacheSourceLease = SafCacheFiles.acquire(source);
+    }
 
     public MuPdfDocument(final MuPdfContext context, final int format, final String fname, final String pwd) {
         super(context, openFile(format, fname, pwd, BookCSS.get()
-                                                           .toCssString(fname)));
+                                                           .toCssString(fname), !(context instanceof EpubContext)));
         this.fname = fname;
         isEpub = ExtUtils.isTextFomat(fname);
         bookType = BookType.getByUri(fname);
@@ -98,7 +105,11 @@ public class MuPdfDocument extends AbstractCodecDocument {
 
     private native static String setMetaData(long docHandle, final String key, String value);
 
-    private static long openFile(final int format, String fname, final String pwd, String css) {
+    private static long openFile(final int format, String fname, final String pwd, String css,
+                                 boolean consumeReservation) {
+        File cacheSource = new File(fname);
+        SafCacheFiles.readerOpened(cacheSource, consumeReservation);
+        boolean opened = false;
         TempHolder.lock.lock();
         try {
             int allocatedMemory = AppState.get().allocatedMemorySize * 1024 * 1024;
@@ -125,8 +136,10 @@ public class MuPdfDocument extends AbstractCodecDocument {
             }
 
             // final int n = getPageCountWithException(open);
+            opened = true;
             return open;
         } finally {
+            if (!opened) SafCacheFiles.readerClosed(cacheSource);
             TempHolder.lock.unlock();
         }
     }
@@ -357,6 +370,11 @@ public class MuPdfDocument extends AbstractCodecDocument {
             free(documentHandle);
         } finally {
             TempHolder.lock.unlock();
+            SafCacheFiles.readerClosed(new File(fname));
+            if (cacheSourceLease != null) {
+                try { cacheSourceLease.close(); } catch (Exception failure) { LOG.e(failure); }
+                cacheSourceLease = null;
+            }
         }
 
         LOG.d("MUPDF! <<< recycle [document]", documentHandle, ExtUtils.getFileName(fname));

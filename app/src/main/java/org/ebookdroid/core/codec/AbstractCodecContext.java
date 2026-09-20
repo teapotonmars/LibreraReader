@@ -5,6 +5,8 @@ import android.graphics.Bitmap;
 import com.foobnix.android.utils.LOG;
 import com.foobnix.ext.CacheZipUtils;
 import com.foobnix.ext.CacheZipUtils.CacheDir;
+import com.foobnix.ext.EpubProcessingSettings;
+import com.foobnix.ext.EpubExtractor;
 import com.foobnix.model.AppSP;
 import com.foobnix.pdf.info.AppsConfig;
 import com.foobnix.pdf.info.ExtUtils;
@@ -12,6 +14,17 @@ import com.foobnix.pdf.info.SafCacheFiles;
 import com.foobnix.sys.TempHolder;
 
 import org.ebookdroid.BookType;
+import org.ebookdroid.droids.EpubContext;
+import org.ebookdroid.droids.MobiContext;
+import org.ebookdroid.droids.TxtContext;
+import org.ebookdroid.droids.Fb2Context;
+import org.ebookdroid.droids.HtmlContext;
+import org.ebookdroid.droids.MhtContext;
+import org.ebookdroid.droids.MdContext;
+import org.ebookdroid.droids.DocContext;
+import org.ebookdroid.droids.DocxContext;
+import org.ebookdroid.droids.OdtContext;
+import org.ebookdroid.droids.RtfContext;
 import org.ebookdroid.droids.mupdf.codec.exceptions.MuPdfPasswordException;
 import org.ebookdroid.droids.mupdf.codec.exceptions.MuPdfPasswordRequiredException;
 import org.ebookdroid.ui.viewer.VerticalViewActivity;
@@ -57,7 +70,6 @@ public abstract class AbstractCodecContext implements CodecContext {
             //recycle();
             try {
                 Thread.sleep(1000);
-                CacheZipUtils.removeFiles(CacheZipUtils.CACHE_BOOK_DIR.listFiles());
                 CacheZipUtils.removeFiles(CacheZipUtils.CACHE_TEMP.listFiles());
             }catch (Exception e){
                 LOG.w(e);
@@ -65,29 +77,45 @@ public abstract class AbstractCodecContext implements CodecContext {
         }
     }
 
-    public static long getFileNameSalt(String path) {
-        long hashCode = 0;
+    public static String sourceRevisionKey(String path) {
         try {
             File file = new File(path);
-            hashCode = file.length() + file.lastModified();
-            LOG.d("getFileNameSalt", path, file.length(), file.lastModified());
+            // Cache publishers register immutable sources whose pathname includes
+            // their revision. Their mtime is an LRU clock, not an input revision.
+            if (SafCacheFiles.isImmutableRevisionNamedSource(file)) return "|immutable-revision-in-path";
+            return "|length=" + file.length() + "|modified=" + file.lastModified();
         } catch (Exception e) {
             LOG.e(e);
+            return "|unreadable-revision=" + java.util.UUID.randomUUID();
         }
-        return hashCode;
     }
 
     @Override
     public CodecDocument openDocument(String fileNameOriginal, String password) {
+        String selectedEpubLanguage = null;
+        if (this instanceof EpubContext) {
+            try {
+                selectedEpubLanguage = EpubContext.prepareProcessingLanguage(EpubExtractor.get()
+                        .getBookMetaInformation(fileNameOriginal).getLang());
+            } catch (Exception failure) { LOG.e(failure); }
+        }
         File source = new File(fileNameOriginal);
         boolean reserved = SafCacheFiles.hasReservation(source);
         AutoCloseable openingLease = SafCacheFiles.acquire(source);
         SafCacheFiles.beginManagedOpen();
-        try {
+        try (EpubProcessingSettings.Scope settings = this instanceof EpubContext
+                ? EpubProcessingSettings.capture(selectedEpubLanguage)
+                : this instanceof MobiContext || this instanceof TxtContext
+                        || this instanceof Fb2Context || this instanceof HtmlContext
+                        || this instanceof MhtContext || this instanceof MdContext
+                        || this instanceof DocContext || this instanceof DocxContext
+                        || this instanceof OdtContext || this instanceof RtfContext
+                        ? EpubProcessingSettings.capture() : null) {
             CodecDocument document = openDocumentWithProtectedSource(fileNameOriginal, password);
             if (document instanceof AbstractCodecDocument) {
                 ((AbstractCodecDocument) document).retainSource(source);
             }
+            if (document != null) CacheZipUtils.pruneBookCache();
             return document;
         } finally {
             SafCacheFiles.endManagedOpen();
@@ -106,11 +134,7 @@ public abstract class AbstractCodecContext implements CodecContext {
 
         LOG.d("Open-Document 2 LANG:", AppSP.get().hypenLang, fileNameOriginal);
 
-        File cacheFileName = getCacheFileName(fileNameOriginal + getFileNameSalt(fileNameOriginal));
-        if (!BookType.ODT.is(fileNameOriginal)) {
-            CacheZipUtils.removeFiles(CacheZipUtils.CACHE_BOOK_DIR.listFiles(), cacheFileName);
-            CacheZipUtils.removeDirs(CacheZipUtils.CACHE_BOOK_DIR.listFiles(), new File(cacheFileName+"-source"));
-        }
+        File cacheFileName = getCacheFileName(fileNameOriginal + sourceRevisionKey(fileNameOriginal));
 
         if (cacheFileName != null && cacheFileName.isFile()) {
             LOG.d("Open-Document from cache", fileNameOriginal);
