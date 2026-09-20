@@ -308,10 +308,16 @@ import java.util.List;
             }
         } else {
             if (controller != null) {
-                TTSService.playBookPage(controller.getCurentPageFirst1() - 1, controller.getCurrentBook()
-                                                                                        .getPath(), "",
-                        controller.getBookWidth(), controller.getBookHeight(), BookCSS.get().fontSizeSp,
-                        controller.getTitle());
+                String bookPath = controller.getCurrentBook().getPath();
+                if (!TTSEngine.get().isShutdown() && bookPath.equals(AppSP.get().lastBookPath)) {
+                    // The reader view may still be on the page where TTS started. Resume from
+                    // the service's page and paragraph instead of starting from that view page.
+                    context.startService(new Intent(TTSNotification.TTS_PLAY, null, context, TTSService.class));
+                } else {
+                    TTSService.playBookPage(controller.getCurentPageFirst1() - 1, bookPath, "",
+                            controller.getBookWidth(), controller.getBookHeight(), BookCSS.get().fontSizeSp,
+                            controller.getTitle());
+                }
             }
         }
     }
@@ -399,7 +405,7 @@ import java.util.List;
                         if (AppState.get().isFastBookmarkByTTS) {
                             if (isPlaying) {
                                 TTSEngine.get()
-                                         .fastTTSBookmakr(getBaseContext(), AppSP.get().lastBookPath,
+                                         .fastTTSBookmakr(getBaseContext(), bookIdentity(),
                                                  AppSP.get().lastBookPage + 1, AppSP.get().lastBookPageCount);
                             } else {
                                 playPage("", AppSP.get().lastBookPage, null);
@@ -831,6 +837,11 @@ import java.util.List;
                 .post(new TtsStatus());
     }
 
+    static String bookIdentity() {
+        String originalUri = AppSP.get().lastBookOriginalUri;
+        return originalUri != null && !originalUri.isEmpty() ? originalUri : AppSP.get().lastBookPath;
+    }
+
     public CodecDocument getDC() {
         try {
 
@@ -1155,13 +1166,15 @@ import java.util.List;
 
             TTSNotification.showLast();
 
+            final String progressBook = bookIdentity();
+            final int progressPageCount = AppSP.get().lastBookPageCount;
             new Thread(() -> {
                 try {
                     Thread.sleep(500);
                 } catch (InterruptedException e) {
                 }
-                AppBook load = SharedBooks.load(AppSP.get().lastBookPath);
-                load.currentPageChanged(pageNumber + 1, AppSP.get().lastBookPageCount);
+                AppBook load = SharedBooks.load(progressBook);
+                load.currentPageChanged(pageNumber + 1, progressPageCount);
 
                 SharedBooks.saveAsync(load);
                 AppProfile.save(this);
