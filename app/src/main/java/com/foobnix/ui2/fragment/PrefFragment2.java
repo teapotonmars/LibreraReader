@@ -3005,6 +3005,7 @@ public class PrefFragment2 extends UIFragment {
                         BookCSS.get().searchPathsJson = JsonDB.remove(BookCSS.get().searchPathsJson, path);
                         showSearchPaths();
                         saveChanges();
+                        SearchAllBooksWorker.deselectRoot(getActivity(), path);
                         LOG.d("Save Changes", 3);
                     }));
 
