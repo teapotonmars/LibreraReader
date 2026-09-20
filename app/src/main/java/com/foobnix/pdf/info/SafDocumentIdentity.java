@@ -7,6 +7,7 @@ import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -96,6 +97,23 @@ public final class SafDocumentIdentity {
                 if (descriptor != null) {
                     remember(context, candidate);
                     return candidate;
+                }
+            } catch (Exception failure) {
+                lastFailure = new IOException("Cannot read " + candidate, failure);
+            }
+        }
+        if (lastFailure != null) throw lastFailure;
+        throw new IOException("Cannot read " + identity);
+    }
+
+    public static InputStream openInputStream(Context context, Uri identity) throws IOException {
+        IOException lastFailure = null;
+        for (Uri candidate : accessCandidates(context, identity)) {
+            try {
+                InputStream input = context.getContentResolver().openInputStream(candidate);
+                if (input != null) {
+                    remember(context, candidate);
+                    return input;
                 }
             } catch (Exception failure) {
                 lastFailure = new IOException("Cannot read " + candidate, failure);

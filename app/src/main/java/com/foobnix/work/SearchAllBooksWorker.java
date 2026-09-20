@@ -3,6 +3,7 @@ package com.foobnix.work;
 import static com.foobnix.pdf.info.AppsConfig.SEARCH_FRAGMENT_WORKER_NAME;
 import static com.foobnix.pdf.info.AppsConfig.WORKER_POLICY;
 
+import android.content.ContentResolver;
 import android.content.Context;
 import android.net.Uri;
 import android.os.Handler;
@@ -20,6 +21,7 @@ import com.foobnix.android.utils.LOG;
 import com.foobnix.android.utils.TxtUtils;
 import com.foobnix.dao2.FileMeta;
 import com.foobnix.ext.CacheZipUtils;
+import com.foobnix.ext.CalirbeExtractor;
 import com.foobnix.ext.EbookMeta;
 import com.foobnix.mobi.parser.IOUtils;
 import com.foobnix.model.AppData;
@@ -33,6 +35,8 @@ import com.foobnix.pdf.info.ExtUtils;
 import com.foobnix.pdf.info.IMG;
 import com.foobnix.pdf.info.Prefs;
 import com.foobnix.pdf.info.SafFileLink;
+import com.foobnix.pdf.info.SafDocumentIdentity;
+import com.foobnix.pdf.info.SafOpfRegistry;
 import com.foobnix.pdf.info.io.SearchCore;
 import com.foobnix.pdf.info.model.BookCSS;
 import com.foobnix.sys.ImageExtractor;
@@ -44,6 +48,7 @@ import org.ebookdroid.common.settings.books.SharedBooks;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -126,6 +131,8 @@ public class SearchAllBooksWorker extends MessageWorker {
                     AppDB.get()::migrateAllSafRows)) return false;
             ImageExtractor.clearErrors();
             itemsMeta = java.util.Collections.synchronizedList(new LinkedList<>());
+            SafOpfRegistry.restore(getApplicationContext());
+            Map<String, SafOpfRegistry.Entry> sidecars = new HashMap<>();
             Map<String, FileMeta> before = new HashMap<>();
             for (FileMeta row : AppDB.get().scanSnapshot()) before.put(row.getPath(), row);
             Set<String> completedRoots = new HashSet<>();
@@ -136,7 +143,7 @@ public class SearchAllBooksWorker extends MessageWorker {
                 if (ExtUtils.isExteralSD(path)) {
                     List<FileMeta> fromRoot = new ArrayList<>();
                     SafDiscovery.collect(getApplicationContext(), Uri.parse(path), fromRoot,
-                            this::isStopped);
+                            sidecars, this::isStopped);
                     itemsMeta.addAll(fromRoot);
                     Set<String> paths = new HashSet<>();
                     for (FileMeta row : fromRoot) paths.add(row.getPath());
@@ -177,9 +184,16 @@ public class SearchAllBooksWorker extends MessageWorker {
             List<SimpleMeta> excluded = AppData.get().getAllExcluded();
             List<FileMeta> synced = AppData.get().getAllSyncBooks();
             if (!ScanMembership.apply(itemsMeta, excluded, synced, this::isStopped)) return false;
-            if (!ScanOwnership.write(scanGeneration, this::isStopped,
-                    () -> AppDB.get().reconcileCompletedScan(
-                            itemsMeta, completedRoots, safMembership))) return false;
+            if (!ScanOwnership.write(scanGeneration, this::isStopped, () -> {
+                AppDB.get().reconcileCompletedScan(itemsMeta, completedRoots, safMembership);
+                for (FileMeta found : itemsMeta) {
+                    if (!ExtUtils.isExteralSD(found.getPath())) continue;
+                    SafOpfRegistry.Entry entry = sidecars.get(found.getPath());
+                    if (entry == null) SafOpfRegistry.unregister(found.getPath());
+                    else SafOpfRegistry.register(found.getPath(), entry);
+                }
+                SafOpfRegistry.save(getApplicationContext());
+            })) return false;
             handler.removeCallbacks(timer);
             if (!ScanOwnership.isCurrent(scanGeneration, this::isStopped)) return false;
             handler.post(refreshTimer);
@@ -199,7 +213,8 @@ public class SearchAllBooksWorker extends MessageWorker {
                 if (ExtUtils.isExteralSD(found.getPath()) && baseline.getState() == null)
                     baseline.setState(FileMetaCore.STATE_BASIC);
                 if (ExtUtils.isExteralSD(found.getPath())) {
-                    if (!publishSafMetadata(found, baseline, scanGeneration, this::isStopped)) return false;
+                    if (!publishSafMetadata(found, baseline, sidecars.get(found.getPath()),
+                            scanGeneration, this::isStopped)) return false;
                 } else if (!publishLocalMetadata(found, baseline,
                         scanGeneration, this::isStopped)) return false;
             }
@@ -237,6 +252,11 @@ public class SearchAllBooksWorker extends MessageWorker {
 
     boolean publishSafMetadata(FileMeta found, FileMeta baseline, long owner,
                                java.util.function.BooleanSupplier stopped) {
+        return publishSafMetadata(found, baseline, null, owner, stopped);
+    }
+
+    boolean publishSafMetadata(FileMeta found, FileMeta baseline, SafOpfRegistry.Entry sidecar,
+                               long owner, java.util.function.BooleanSupplier stopped) {
         FileMeta extracted = new FileMeta(found.getPath());
         extracted.setTitle(found.getTitle());
         extracted.setPathTxt(found.getPathTxt());
@@ -246,7 +266,7 @@ public class SearchAllBooksWorker extends MessageWorker {
         extracted.setState(FileMetaCore.STATE_BASIC);
         boolean extractionSucceeded = false;
         try {
-            EbookMeta metadata = readSafMetadataForScan(found);
+            EbookMeta metadata = readSafMetadataForScan(found, sidecar);
             FileMetaCore.get().udpateFullMeta(extracted, metadata);
             if (TxtUtils.isEmpty(extracted.getTitle()) || extracted.getTitle().startsWith("saf_"))
                 extracted.setTitle(found.getTitle());
@@ -264,6 +284,24 @@ public class SearchAllBooksWorker extends MessageWorker {
         }
     }
 
+    protected EbookMeta readSafMetadataForScan(FileMeta found, SafOpfRegistry.Entry sidecar)
+            throws Exception {
+        if (AppState.get().isUseCalibreOpf
+                && !AppState.get().isShowOnlyOriginalFileNames && sidecar != null) {
+            try (InputStream input = SafDocumentIdentity.openInputStream(
+                    getApplicationContext(), sidecar.opfUri)) {
+                EbookMeta metadata = CalirbeExtractor.getBookMetaInformationFromStream(input,
+                        SafOpfRegistry.coverResolver(getApplicationContext(), sidecar.siblingByLowerName));
+                if (metadata == null || metadata.isExtractionFailed()
+                        || TxtUtils.isEmpty(metadata.getTitle()))
+                    throw new IOException("Calibre sidecar metadata unavailable: " + sidecar.opfUri);
+                metadata.setUnzipPath(found.getPath());
+                return metadata;
+            }
+        }
+        return readSafMetadataForScan(found);
+    }
+
     /** A missing or unreadable discovery cannot certify an empty metadata result. */
     protected EbookMeta readLocalMetadata(File source) throws IOException {
         try (java.io.FileInputStream input = new java.io.FileInputStream(source)) {
@@ -277,6 +315,7 @@ public class SearchAllBooksWorker extends MessageWorker {
         }
         return metadata;
     }
+
 
     public void updateBookAnnotations() {
         if (!AppState.get().isDisplayAnnotation) return;
