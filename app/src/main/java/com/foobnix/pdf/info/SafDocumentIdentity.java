@@ -10,6 +10,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Set;
 
 /** A provider document has one reading identity even when several tree grants reach it. */
@@ -31,14 +33,27 @@ public final class SafDocumentIdentity {
 
     /** Remember a grant-bearing address; the identity itself is deliberately grant-neutral. */
     public static void remember(Context context, Uri access) {
-        Uri identity = canonical(access);
-        if (identity == null || identity.equals(access)) return;
-        String key = identity.toString();
+        rememberAll(context, java.util.Collections.singletonList(access));
+    }
+
+    public static synchronized void rememberAll(Context context, Iterable<Uri> accesses) {
         var prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        Set<String> known = new LinkedHashSet<>(prefs.getStringSet(key + "|all",
-                java.util.Collections.emptySet()));
+        var editor = prefs.edit();
+        Map<String, Set<String>> updated = new LinkedHashMap<>();
+        boolean changed = false;
+        for (Uri access : accesses) {
+        Uri identity = canonical(access);
+        if (identity == null || identity.equals(access)) continue;
+        String key = identity.toString();
+        Set<String> known = updated.computeIfAbsent(key, ignored -> new LinkedHashSet<>(
+                prefs.getStringSet(key + "|all", java.util.Collections.emptySet())));
         known.add(access.toString());
-        prefs.edit().putString(key, access.toString()).putStringSet(key + "|all", known).apply();
+        editor.putString(key, access.toString());
+        changed = true;
+        }
+        for (Map.Entry<String, Set<String>> entry : updated.entrySet())
+            editor.putStringSet(entry.getKey() + "|all", entry.getValue());
+        if (changed) editor.apply();
     }
 
     /** Candidates are tried by the caller because a saved tree grant may have been revoked. */

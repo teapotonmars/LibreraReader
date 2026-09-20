@@ -4,6 +4,7 @@ import static com.foobnix.pdf.info.AppsConfig.SEARCH_FRAGMENT_WORKER_NAME;
 import static com.foobnix.pdf.info.AppsConfig.WORKER_POLICY;
 
 import android.content.Context;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 
@@ -31,6 +32,7 @@ import com.foobnix.pdf.info.Clouds;
 import com.foobnix.pdf.info.ExtUtils;
 import com.foobnix.pdf.info.IMG;
 import com.foobnix.pdf.info.Prefs;
+import com.foobnix.pdf.info.SafFileLink;
 import com.foobnix.pdf.info.io.SearchCore;
 import com.foobnix.pdf.info.model.BookCSS;
 import com.foobnix.sys.ImageExtractor;
@@ -75,19 +77,23 @@ public class SearchAllBooksWorker extends MessageWorker {
                 .enqueueUniqueWork(SEARCH_FRAGMENT_WORKER_NAME, WORKER_POLICY, workRequest);
     }
 
-    private static Set<String> selectedRoots() {
+    static Set<String> selectedRoots() {
         Set<String> roots = new HashSet<>();
         for (String path : JsonDB.get(BookCSS.get().searchPathsJson)) {
-            if (path != null && !path.trim().isEmpty()) roots.add(new File(path).getPath());
+            if (path == null || path.trim().isEmpty()) continue;
+            roots.add(ExtUtils.isExteralSD(path) ? path : new File(path).getPath());
         }
         return roots;
     }
 
+    /** Explicit removal also clears membership from older local scans that never recorded it. */
     public static void deselectRoot(Context context, String removedRoot) {
         IO.writeObjSync(AppProfile.syncCSS, BookCSS.get());
         long owner = ScanOwnership.claim();
+        String root = ExtUtils.isExteralSD(removedRoot)
+                ? removedRoot : new File(removedRoot).getPath();
         ScanOwnership.write(owner, () -> false, () -> AppDB.get().reconcileDeselectedRoots(
-                selectedRoots(), java.util.Collections.singleton(new File(removedRoot).getPath())));
+                selectedRoots(), java.util.Collections.singleton(root)));
         run(context);
     }
 
@@ -107,7 +113,7 @@ public class SearchAllBooksWorker extends MessageWorker {
         return ScanOwnership.write(scanGeneration, () -> false, action);
     }
 
-    public boolean doWorkInner() throws IOException {
+    public boolean doWorkInner() throws IOException, InterruptedException {
         scanGeneration = ScanOwnership.adopt(
                 getInputData().getLong(ScanOwnership.GENERATION, 0));
         if (!reconcileSelection(scanGeneration, this::isStopped)) return false;
@@ -116,23 +122,36 @@ public class SearchAllBooksWorker extends MessageWorker {
         try {
             Tags2.migration();
             AppProfile.init(getApplicationContext());
+            if (!ScanOwnership.write(scanGeneration, this::isStopped,
+                    AppDB.get()::migrateAllSafRows)) return false;
             ImageExtractor.clearErrors();
             itemsMeta = java.util.Collections.synchronizedList(new LinkedList<>());
             Map<String, FileMeta> before = new HashMap<>();
             for (FileMeta row : AppDB.get().scanSnapshot()) before.put(row.getPath(), row);
             Set<String> completedRoots = new HashSet<>();
-            Map<String, Set<String>> rootMembership = new HashMap<>();
+            Map<String, Set<String>> safMembership = new HashMap<>();
             handler.post(timer);
             for (String path : JsonDB.get(BookCSS.get().searchPathsJson)) {
                 if (path == null || path.trim().isEmpty()) continue;
-                File root = new File(path);
-                List<FileMeta> fromRoot = new ArrayList<>();
-                LocalDiscovery.collect(root, ExtUtils.seachExts, fromRoot, this::isStopped);
-                itemsMeta.addAll(fromRoot);
-                Set<String> paths = new HashSet<>();
-                for (FileMeta row : fromRoot) paths.add(row.getPath());
-                rootMembership.put(root.getPath(), paths);
-                completedRoots.add(root.getPath());
+                if (ExtUtils.isExteralSD(path)) {
+                    List<FileMeta> fromRoot = new ArrayList<>();
+                    SafDiscovery.collect(getApplicationContext(), Uri.parse(path), fromRoot,
+                            this::isStopped);
+                    itemsMeta.addAll(fromRoot);
+                    Set<String> paths = new HashSet<>();
+                    for (FileMeta row : fromRoot) paths.add(row.getPath());
+                    safMembership.put(path, paths);
+                    completedRoots.add(path);
+                } else {
+                    File root = new File(path);
+                    List<FileMeta> fromRoot = new ArrayList<>();
+                    LocalDiscovery.collect(root, ExtUtils.seachExts, fromRoot, this::isStopped);
+                    itemsMeta.addAll(fromRoot);
+                    Set<String> paths = new HashSet<>();
+                    for (FileMeta row : fromRoot) paths.add(row.getPath());
+                    safMembership.put(root.getPath(), paths);
+                    completedRoots.add(root.getPath());
+                }
             }
             if (isStopped()) return false;
             if (itemsMeta.isEmpty() && !selectedRoots().isEmpty()) {
@@ -151,12 +170,16 @@ public class SearchAllBooksWorker extends MessageWorker {
                 } catch (Exception failure) { LOG.e(failure); }
                 LocalDiscovery.collect(downloadsDir, ExtUtils.seachExts, itemsMeta, this::isStopped);
             }
+            Map<String, FileMeta> unique = new java.util.LinkedHashMap<>();
+            for (FileMeta row : itemsMeta) unique.putIfAbsent(row.getPath(), row);
+            itemsMeta.clear();
+            itemsMeta.addAll(unique.values());
             List<SimpleMeta> excluded = AppData.get().getAllExcluded();
             List<FileMeta> synced = AppData.get().getAllSyncBooks();
             if (!ScanMembership.apply(itemsMeta, excluded, synced, this::isStopped)) return false;
             if (!ScanOwnership.write(scanGeneration, this::isStopped,
                     () -> AppDB.get().reconcileCompletedScan(
-                            itemsMeta, completedRoots, rootMembership))) return false;
+                            itemsMeta, completedRoots, safMembership))) return false;
             handler.removeCallbacks(timer);
             if (!ScanOwnership.isCurrent(scanGeneration, this::isStopped)) return false;
             handler.post(refreshTimer);
@@ -166,12 +189,19 @@ public class SearchAllBooksWorker extends MessageWorker {
                 if (baseline == null) {
                     baseline = new FileMeta(found.getPath());
                     baseline.setTitle(found.getTitle());
+                    if (ExtUtils.isExteralSD(found.getPath()))
+                        baseline.setState(FileMetaCore.STATE_BASIC);
                     com.foobnix.model.AppBook progress = SharedBooks.load(found.getPath());
                     if (!ScanOwnership.write(scanGeneration, this::isStopped,
                             () -> AppDB.get().initializeReadingProgress(found.getPath(), progress.p, progress.t)))
                         return false;
                 }
-                if (!publishLocalMetadata(found, baseline, scanGeneration, this::isStopped)) return false;
+                if (ExtUtils.isExteralSD(found.getPath()) && baseline.getState() == null)
+                    baseline.setState(FileMetaCore.STATE_BASIC);
+                if (ExtUtils.isExteralSD(found.getPath())) {
+                    if (!publishSafMetadata(found, baseline, scanGeneration, this::isStopped)) return false;
+                } else if (!publishLocalMetadata(found, baseline,
+                        scanGeneration, this::isStopped)) return false;
             }
             itemsMeta.clear();
             handler.removeCallbacks(refreshTimer);
@@ -203,6 +233,35 @@ public class SearchAllBooksWorker extends MessageWorker {
         boolean completed = extractionSucceeded;
         return ScanOwnership.write(owner, stopped,
                 () -> AppDB.get().updateScannedMetadata(extracted, baseline, completed));
+    }
+
+    boolean publishSafMetadata(FileMeta found, FileMeta baseline, long owner,
+                               java.util.function.BooleanSupplier stopped) {
+        FileMeta extracted = new FileMeta(found.getPath());
+        extracted.setTitle(found.getTitle());
+        extracted.setPathTxt(found.getPathTxt());
+        extracted.setSize(found.getSize());
+        extracted.setDate(found.getDate());
+        extracted.setExt(found.getExt());
+        extracted.setState(FileMetaCore.STATE_BASIC);
+        boolean extractionSucceeded = false;
+        try {
+            EbookMeta metadata = readSafMetadataForScan(found);
+            FileMetaCore.get().udpateFullMeta(extracted, metadata);
+            if (TxtUtils.isEmpty(extracted.getTitle()) || extracted.getTitle().startsWith("saf_"))
+                extracted.setTitle(found.getTitle());
+            extractionSucceeded = true;
+        } catch (Exception failure) { LOG.e(failure); }
+        boolean completed = extractionSucceeded;
+        return ScanOwnership.write(owner, stopped,
+                () -> AppDB.get().updateScannedMetadata(extracted, baseline, completed));
+    }
+
+    protected EbookMeta readSafMetadataForScan(FileMeta found) throws Exception {
+        try (SafFileLink link = new SafFileLink(getApplicationContext(),
+                Uri.parse(found.getPath()), found.getPathTxt())) {
+            return readLocalMetadata(link.file);
+        }
     }
 
     /** A missing or unreadable discovery cannot certify an empty metadata result. */
