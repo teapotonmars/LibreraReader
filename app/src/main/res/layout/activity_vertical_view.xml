@@ -195,9 +195,6 @@
             </FrameLayout>
         </FrameLayout>
 
-        <!-- Where the controls are made; the screen moves them into the slot the panel keeps
-             for them, on the middle of the row it names the playlist in, so they stand with
-             the panels rather than over the words being read. -->
         <com.foobnix.tts.TTSControlsView
             android:id="@+id/ttsActive"
             android:layout_width="match_parent"
@@ -205,7 +202,8 @@
             android:layout_above="@+id/bottomBar1"
             android:layout_alignParentBottom="true"
             android:layout_centerHorizontal="true"
-            android:layout_marginBottom="15dip" />
+            android:layout_marginBottom="15dip"
+            android:visibility="gone" />
 
         <FrameLayout
             android:id="@+id/overlay"
