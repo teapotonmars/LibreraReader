@@ -10,11 +10,7 @@
         android:clickable="true"
         android:orientation="vertical">
 
-        <!-- The row is held off the head of the panel by as much as the strip below it holds
-             the covers off, so the button has the same air above it as beneath. The name and
-             the close button are given the same weight either side of the slot the reading
-             controls stand in, so those controls keep the middle of the panel however long
-             the name beside them runs. -->
+        <!-- Keep the panel title and close button balanced on opposite sides. -->
         <LinearLayout
             android:id="@+id/playListParent"
             android:layout_width="match_parent"
@@ -49,14 +45,6 @@
                     android:text="@string/edit"
                     android:visibility="gone" />
             </LinearLayout>
-
-            <!-- The controls that play the book are put in here by the reading screen; the
-                 slot takes no room of its own while they are away. -->
-            <FrameLayout
-                android:id="@+id/ttsControlsSlot"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_weight="0" />
 
             <LinearLayout
                 android:layout_width="0dip"

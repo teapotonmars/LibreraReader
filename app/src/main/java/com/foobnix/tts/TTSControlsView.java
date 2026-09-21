@@ -16,6 +16,7 @@ import android.view.MenuItem.OnMenuItemClickListener;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.SeekBar.OnSeekBarChangeListener;
 import android.widget.TextView;
@@ -41,6 +42,8 @@ public class TTSControlsView extends FrameLayout {
 
     Handler handler;
     private ImageView ttsPlayPause;
+    private ImageView ttsPrev;
+    private ImageView ttsNext;
     private DocumentController controller;
     private ImageView ttsDialog;
     private View layoutMp3;
@@ -99,8 +102,8 @@ public class TTSControlsView extends FrameLayout {
         ttsPlayPause = (ImageView) view.findViewById(R.id.ttsPlay);
 
 
-        final ImageView ttsNext = (ImageView) view.findViewById(R.id.ttsNext);
-        final ImageView ttsPrev = (ImageView) view.findViewById(R.id.ttsPrev);
+        ttsNext = (ImageView) view.findViewById(R.id.ttsNext);
+        ttsPrev = (ImageView) view.findViewById(R.id.ttsPrev);
 
         ttsPrevTrack = (ImageView) view.findViewById(R.id.ttsPrevTrack);
         ttsNextTrack = (ImageView) view.findViewById(R.id.ttsNextTrack);
@@ -317,11 +320,34 @@ public class TTSControlsView extends FrameLayout {
         TTSService.onReaderOpened(dc);
     }
 
-    /**
-     * Drops the mark that stops the reading. The panel keeps the book open behind it and has
-     * its own way out, so the line standing in it carries only what plays the book; the
-     * dialog, which is read on its own, keeps the mark.
-     */
+    /** Restore the translucent, theme-coloured buttons when this view floats over a page. */
+    public void useFloatingAppearance() {
+        view.setPadding(dp(4), dp(4), dp(4), dp(4));
+        ttsPrev.setImageResource(R.drawable.glyphicons_173_rewind);
+        ttsNext.setImageResource(R.drawable.glyphicons_177_forward);
+        setTintColor(MagicHelper.getTintColor());
+        int size = getResources().getDimensionPixelSize(R.dimen.wh_tts_floating_button);
+        for (ImageView button : new ImageView[]{ttsPrev, ttsPlayPause, ttsNext,
+                ttsPrevTrack, ttsNextTrack, ttsDialog, view.findViewById(R.id.ttsStop)}) {
+            button.setBackgroundResource(R.drawable.bg_clickable);
+            LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) button.getLayoutParams();
+            params.height = Math.max(params.height, size);
+            if (button != ttsPrev) params.width = Math.max(params.width, size);
+            button.setLayoutParams(params);
+        }
+        for (ImageView button : new ImageView[]{ttsPrev, ttsPlayPause, ttsNext,
+                ttsPrevTrack, ttsNextTrack, view.findViewById(R.id.ttsStop)}) {
+            LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) button.getLayoutParams();
+            params.leftMargin = dp(10);
+            button.setLayoutParams(params);
+        }
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    /** Keep the page navigator compact; the TTS dialog retains its stop control. */
     public void hideStop() {
         View stop = view.findViewById(R.id.ttsStop);
         if (stop != null) {
@@ -330,8 +356,7 @@ public class TTSControlsView extends FrameLayout {
     }
 
     public void addOnDialogRunnable(final Runnable run) {
-        // The mark that opens the settings stays hidden: the line carries the four controls
-        // that play the book and nothing else, and the settings are reached from the bar.
+        // The compact navigator keeps settings in the reader menu.
         ttsDialog.setOnClickListener(new OnClickListener() {
 
             @Override
