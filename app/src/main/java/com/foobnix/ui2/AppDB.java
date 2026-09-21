@@ -49,6 +49,8 @@ public class AppDB {
     DatabaseUpgradeHelper helper;
     String currentDB;
     private FileMetaDao fileMetaDao;
+    /** Legacy tree-grant aliases need one migration per opened profile database. */
+    private boolean safAliasesMigrated;
     private DaoSession daoSession;
     private DictMetaDao dictMetaDao;
 
@@ -125,6 +127,7 @@ public class AppDB {
         daoSession = daoMaster.newSession();
 
         fileMetaDao = daoSession.getFileMetaDao();
+        safAliasesMigrated = false;
 
         // Calibre's "no date" (0101-01-01, or 0100-12-31 after a time zone) used to be kept
         // as a book published in the year 100 or 101.
@@ -633,31 +636,7 @@ public class AppDB {
         if (!ExtUtils.isExteralSD(path)) return path;
         String identity = SafDocumentIdentity.canonical(Uri.parse(path)).toString();
         if (fileMetaDao == null) return identity;
-        List<String> aliases = new ArrayList<>();
-        try (Cursor cursor = fileMetaDao.getDatabase().rawQuery(
-                "SELECT PATH FROM FILE_META WHERE PATH LIKE 'content:%'", null)) {
-            while (cursor.moveToNext()) {
-                String candidate = cursor.getString(0);
-                if (!identity.equals(candidate) && identity.equals(
-                        SafDocumentIdentity.canonical(Uri.parse(candidate)).toString())) {
-                    aliases.add(candidate);
-                }
-            }
-        }
-        if (aliases.isEmpty()) return identity;
-        Database db = fileMetaDao.getDatabase();
-        db.beginTransaction();
-        try {
-            db.execSQL("CREATE TABLE IF NOT EXISTS SCAN_MEMBERSHIP ("
-                    + "ROOT TEXT NOT NULL, PATH TEXT NOT NULL, PRIMARY KEY(ROOT,PATH))");
-            for (String alias : aliases) {
-                migrateSafAliasRow(db, alias, identity);
-            }
-            db.setTransactionSuccessful();
-        } finally {
-            db.endTransaction();
-            fileMetaDao.detachAll();
-        }
+        if (!safAliasesMigrated) migrateAllSafRows();
         return identity;
     }
 
@@ -673,7 +652,10 @@ public class AppDB {
                 if (!path.equals(identity)) aliases.add(new String[]{path, identity});
             }
         }
-        if (aliases.isEmpty()) return;
+        if (aliases.isEmpty()) {
+            safAliasesMigrated = true;
+            return;
+        }
         Database db = fileMetaDao.getDatabase();
         db.beginTransaction();
         try {
@@ -685,6 +667,7 @@ public class AppDB {
             db.endTransaction();
             fileMetaDao.detachAll();
         }
+        safAliasesMigrated = true;
     }
 
     private void migrateSafAliasRow(Database db, String alias, String identity) {
