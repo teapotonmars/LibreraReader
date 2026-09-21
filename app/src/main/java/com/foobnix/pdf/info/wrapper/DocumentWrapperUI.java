@@ -20,7 +20,6 @@ import android.view.MenuItem.OnMenuItemClickListener;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.View.OnLongClickListener;
-import android.view.ViewGroup;
 import android.view.ViewTreeObserver.OnGlobalLayoutListener;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
@@ -1220,8 +1219,8 @@ public class DocumentWrapperUI {
 
         ttsActive = a.findViewById(R.id.ttsActive);
         ttsActive.setDC(dc);
+        ttsActive.useFloatingAppearance();
         ttsActive.hideStop();
-        moveTtsControlsIntoPanel();
         ttsActive.addOnDialogRunnable(new Runnable() {
 
             @Override
@@ -1813,35 +1812,12 @@ public class DocumentWrapperUI {
 
     }
 
-    /**
-     * Puts the reading controls in the slot the recent panel keeps for them, on the middle of
-     * the row it names itself in - where the page-at-a-time screen stands them. They were a
-     * sheet of their own floating over the page.
-     */
-    private void moveTtsControlsIntoPanel() {
-        final View slot = a.findViewById(R.id.ttsControlsSlot);
-        if (ttsActive == null || !(slot instanceof ViewGroup) || ttsActive.getParent() == slot) {
-            return;
-        }
-        if (ttsActive.getParent() instanceof ViewGroup) {
-            ((ViewGroup) ttsActive.getParent()).removeView(ttsActive);
-        }
-        final FrameLayout.LayoutParams lp =
-                new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
-                                             FrameLayout.LayoutParams.WRAP_CONTENT);
-        lp.gravity = Gravity.CENTER;
-        ((ViewGroup) slot).addView(ttsActive, lp);
-    }
-
-    /**
-     * The reading controls stand with the panels, not over the page. They were shown for as
-     * long as speech was running, which left them lying across the words being read.
-     */
+    /** Keep the playback navigator on the page while speech is active. */
     private void showTtsControls() {
         if (ttsActive == null) {
             return;
         }
-        ttsActive.setVisibility(TxtUtils.visibleIf(!TTSEngine.get().isShutdown() && AppState.get().isEditMode));
+        ttsActive.setVisibility(TxtUtils.visibleIf(!TTSEngine.get().isShutdown()));
     }
 
     public void hide() {
