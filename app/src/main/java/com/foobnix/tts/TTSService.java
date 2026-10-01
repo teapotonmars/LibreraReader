@@ -76,6 +76,11 @@ import androidx.media.MediaBrowserServiceCompat;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 @TargetApi(Build.VERSION_CODES.O) public class TTSService extends MediaBrowserServiceCompat {
     public static final String EXTRA_PATH = "EXTRA_PATH";
@@ -205,7 +210,7 @@ import java.util.List;
     volatile boolean isStartForeground = false;
     CodecDocument cache;
     String path;
-    int wh;
+    volatile TtsPageLayout cacheLayout;
     int emptyPageCount = 0;
     final OnAudioFocusChangeListener listener = new OnAudioFocusChangeListener() {
         @Override public void onAudioFocusChange(int focusChange) {
@@ -224,7 +229,7 @@ import java.util.List;
 
             if (focusChange < 0) {
                 isPlaying = TTSEngine.get()
-                                     .isPlaying();
+                                     .isPlaybackRequested();
                 LOG.d("onAudioFocusChange", "Is playing", isPlaying);
                 stopMediaSesstionAndReleaweWakeLock();
                 TTSNotification.showLast();
@@ -329,9 +334,14 @@ import java.util.List;
                 ? null : controller.getCurrentBook().getPath();
         TTSService live = serviceRef;
         ReaderTtsAction action = bookPath == null
-                ? (TTSEngine.get().isPlaying() ? ReaderTtsAction.PAUSE : ReaderTtsAction.START_BOOK)
+                ? (TTSEngine.get().isPlaybackRequested() ? ReaderTtsAction.PAUSE : ReaderTtsAction.START_BOOK)
                 : readerAction(bookPath, live == null ? null : live.activeBookPath,
-                        TTSEngine.get().isPlaying(), TTSEngine.get().isShutdown());
+                        TTSEngine.get().isPlaybackRequested(), TTSEngine.get().isShutdown());
+        if (action == ReaderTtsAction.RESUME && live != null
+                && !live.matchesReaderLayout(controller)) {
+            live.setActiveParagraph(0);
+            action = ReaderTtsAction.START_BOOK;
+        }
         if (action == ReaderTtsAction.PAUSE) {
             PendingIntent next = PendingIntent.getService(context, 0,
                     new Intent(TTSNotification.TTS_PAUSE, null, context, TTSService.class),
@@ -346,6 +356,39 @@ import java.util.List;
             context.startService(new Intent(TTSNotification.TTS_PLAY, null, context, TTSService.class));
         } else if (controller != null && bookPath != null) {
             TTSService.playBookPage(controller.getCurentPageFirst1() - 1, bookPath, "",
+                    controller.getBookWidth(), controller.getBookHeight(), BookCSS.get().fontSizeSp,
+                    controller.getTitle());
+        }
+    }
+
+    private boolean matchesReaderLayout(DocumentController controller) {
+        TtsPageLayout layout = cacheLayout;
+        return layout != null && layout.matches(readerLayout(controller));
+    }
+
+    private static TtsPageLayout readerLayout(DocumentController controller) {
+        return new TtsPageLayout(controller.getBookWidth(), controller.getBookHeight(),
+                BookCSS.get().fontSizeSp, BookCSS.get().toCssString(controller.getCurrentBook().getPath()));
+    }
+
+    /** A reopened reader may have repaginated after a font, style, or screen-size change. */
+    public static void onReaderOpened(DocumentController controller) {
+        TTSService live = serviceRef;
+        if (live == null || controller == null || controller.getCurrentBook() == null
+                || TTSEngine.get().isMp3() || TTSEngine.get().isShutdown()
+                || !controller.getCurrentBook().getPath().equals(live.activeBookPath)
+                || live.matchesReaderLayout(controller)) return;
+
+        // Old page and paragraph numbers have no meaning in the reader's new layout.
+        live.speechPageGeneration.incrementAndGet();
+        live.activePage = controller.getCurentPageFirst1() - 1;
+        live.setActiveParagraph(0);
+        AppSP.get().lastBookWidth = controller.getBookWidth();
+        AppSP.get().lastBookHeight = controller.getBookHeight();
+        AppSP.get().lastFontSize = BookCSS.get().fontSizeSp;
+        live.restoreActivePosition();
+        if (TTSEngine.get().isPlaybackRequested()) {
+            playBookPage(live.activePage, controller.getCurrentBook().getPath(), "",
                     controller.getBookWidth(), controller.getBookHeight(), BookCSS.get().fontSizeSp,
                     controller.getTitle());
         }
@@ -418,7 +461,7 @@ import java.util.List;
                                                   .get(Intent.EXTRA_KEY_EVENT);
 
                 boolean isPlaying = TTSEngine.get()
-                                             .isPlaying();
+                                             .isPlaybackRequested();
 
                 LOG.d(TAG, "onMediaButtonEvent", "isActivated", isActivated, "isPlaying", isPlaying, "event", event);
 
@@ -783,7 +826,7 @@ import java.util.List;
             }
 
             if (TTSEngine.get()
-                         .isPlaying()) {
+                         .isPlaybackRequested()) {
                 restoreActivePosition();
                 stopMediaSesstionAndReleaweWakeLock();
             } else {
@@ -871,7 +914,19 @@ import java.util.List;
         return START_STICKY;
     }
 
+    private final ExecutorService speechExecutor = Executors.newSingleThreadExecutor();
+    private void postSpeechTask(Runnable task) {
+        try {
+            speechExecutor.execute(task);
+        } catch (RejectedExecutionException e) {
+            if (!speechExecutor.isShutdown()) throw e;
+        }
+    }
+
+    private final AtomicLong speechPageGeneration = new AtomicLong();
+
     private void stopMediaSesstionAndReleaweWakeLock() {
+        speechPageGeneration.incrementAndGet();
         TTSEngine.get()
                  .stop(mMediaSessionCompat);
         releaseWakeLock();
@@ -880,17 +935,61 @@ import java.util.List;
                 .post(new TtsStatus());
     }
 
-    public CodecDocument getDC() {
+    private CodecDocument preparedDocument;
+    private int preparedPage = -1;
+    private String preparedText;
+
+    // Keep just one page ahead, and never reuse it for a seek or a different document.
+    private synchronized String readPageText(CodecDocument document, int pageNumber, boolean continuing) {
+        if (continuing && preparedDocument == document && preparedPage == pageNumber
+                && preparedText != null) {
+            String result = preparedText;
+            preparedText = null;
+            return result;
+        }
+        CodecPage page = document.getPage(pageNumber);
+        if (page == null) return null;
+        try {
+            return TxtUtils.replaceHTMLforTTS(page.getPageHTML());
+        } finally {
+            page.recycle();
+        }
+    }
+
+    private synchronized void prepareNextPage(CodecDocument document, int pageNumber) {
+        if (cache != document || activePage != pageNumber - 1
+                || !TTSEngine.get().isPlaybackRequested()) return;
+        preparedText = null;
+        if (pageNumber >= document.getPageCount()) return;
+        try {
+            preparedText = readPageText(document, pageNumber, false);
+            preparedDocument = document;
+            preparedPage = pageNumber;
+        } catch (Exception e) {
+            // A failed speculative read must not interrupt the current page.
+            LOG.e(e);
+        }
+    }
+
+    public synchronized CodecDocument getDC() {
         try {
 
+            TtsPageLayout requestedLayout = new TtsPageLayout(AppSP.get().lastBookWidth,
+                    AppSP.get().lastBookHeight, BookCSS.get().fontSizeSp,
+                    BookCSS.get().toCssString(AppSP.get().lastBookPath));
+
             if (AppSP.get().lastBookPath != null && AppSP.get().lastBookPath.equals(
-                    path) && cache != null && wh == AppSP.get().lastBookWidth + AppSP.get().lastBookHeight) {
+                    path) && cache != null && !cache.isRecycled()
+                    && requestedLayout.matches(cacheLayout)) {
                 LOG.d(TAG, "CodecDocument from cache", AppSP.get().lastBookPath);
                 return cache;
             }
             if (cache != null) {
+                preparedText = null;
+                preparedDocument = null;
                 cache.recycle();
                 cache = null;
+                cacheLayout = null;
             }
             path = AppSP.get().lastBookPath;
             LOG.d(TAG, "CodecDocument", "loadingCancelled", TempHolder.get().loadingCancelled);
@@ -899,8 +998,8 @@ import java.util.List;
                 TTSNotification.hideNotification();
                 return null;
             }
-            cache.getPageCount(AppSP.get().lastBookWidth, AppSP.get().lastBookHeight, BookCSS.get().fontSizeSp);
-            wh = AppSP.get().lastBookWidth + AppSP.get().lastBookHeight;
+            cache.getPageCount(requestedLayout.width, requestedLayout.height, requestedLayout.fontSize);
+            cacheLayout = requestedLayout;
             LOG.d(TAG, "CodecDocument new", AppSP.get().lastBookPath, AppSP.get().lastBookWidth,
                     AppSP.get().lastBookHeight);
             return cache;
@@ -931,7 +1030,7 @@ import java.util.List;
         }
         long position = Math.max(0, AppSP.get().lastBookPage) * perPage;
         final long start = pageStartMs;
-        if (start > 0 && TTSEngine.get().isPlaying()) {
+        if (start > 0 && TTSEngine.get().isPlaybackRequested()) {
             position += Math.min(System.currentTimeMillis() - start, perPage);
         }
         final long duration = bookDurationMs();
@@ -944,7 +1043,7 @@ import java.util.List;
             if (session == null) {
                 return;
             }
-            final boolean playing = TTSEngine.get().isPlaying();
+            final boolean playing = TTSEngine.get().isPlaybackRequested();
             // Keep the session active even while paused. Android 13+ renders a MediaStyle
             // notification only through the media controls, and hides it completely when the
             // session is inactive - TTSEngine.stop() deactivates it on pause, which would
@@ -1006,6 +1105,27 @@ import java.util.List;
 
     @TargetApi(Build.VERSION_CODES.ICE_CREAM_SANDWICH_MR1)
     private void playPage(String preText, int pageNumber, String anchor) {
+        playPage(preText, pageNumber, anchor, false);
+    }
+
+    private void playPage(String preText, int pageNumber, String anchor, boolean continuing) {
+        final long generation = speechPageGeneration.incrementAndGet();
+        if (!speechExecutor.isShutdown()) {
+            postSpeechTask(() -> {
+                if (speechPageGeneration.get() == generation) {
+                    try {
+                        playPageOnWorker(preText, pageNumber, anchor, continuing, generation);
+                    } catch (RuntimeException e) {
+                        LOG.e(e);
+                        if (speechPageGeneration.get() == generation) stopMediaSesstionAndReleaweWakeLock();
+                    }
+                }
+            });
+        }
+    }
+
+    private void playPageOnWorker(String preText, int pageNumber, String anchor,
+                                  boolean continuing, long speechGeneration) {
         if (activeBookPath != null && !activeBookPath.equals(AppSP.get().lastBookPath))
             restoreActivePosition();
         //releaseWakeLock();
@@ -1013,7 +1133,7 @@ import java.util.List;
         mMediaSessionCompat.setActive(true);
         updatePlaybackState();
 
-        if (!AppState.get().allowOtherMusic) {
+        if (!continuing && !AppState.get().allowOtherMusic) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 mAudioManager.requestAudioFocus((AudioFocusRequest) audioFocusRequest);
             } else {
@@ -1024,8 +1144,6 @@ import java.util.List;
         LOG.d("playPage", preText, pageNumber, anchor);
         if (pageNumber != -1) {
             isActivated = true;
-            EventBus.getDefault()
-                    .post(new MessagePageNumber(pageNumber));
             AppSP.get().lastBookPage = pageNumber;
             activePage = pageNumber;
             CodecDocument dc = getDC();
@@ -1049,8 +1167,8 @@ import java.util.List;
                 return;
             }
 
-            CodecPage page = dc.getPage(pageNumber);
-            if(page==null){
+            String pageHTML = readPageText(dc, pageNumber, continuing);
+            if (pageHTML == null) {
                 EventBus.getDefault()
                         .post(new TtsStatus());
 
@@ -1058,9 +1176,6 @@ import java.util.List;
                 stopSelf();
                 return;
             }
-            String pageHTML = page.getPageHTML();
-            page.recycle();
-            pageHTML = TxtUtils.replaceHTMLforTTS(pageHTML);
 
             if (TxtUtils.isNotEmpty(anchor)) {
                 int indexOf = pageHTML.indexOf(anchor);
@@ -1076,7 +1191,9 @@ import java.util.List;
                 LOG.d("empty page play next one", emptyPageCount);
                 emptyPageCount++;
                 if (emptyPageCount < 3) {
-                    playPage("", AppSP.get().lastBookPage + 1, null);
+                    playPage("", AppSP.get().lastBookPage + 1, null, true);
+                } else {
+                    stopMediaSesstionAndReleaweWakeLock();
                 }
                 return;
             }
@@ -1089,38 +1206,74 @@ import java.util.List;
             final String secondPart =
                     pageNumber + 1 >= AppSP.get().lastBookPageCount || AppState.get().ttsTunnOnLastWord ? "" : parts[1];
 
+            int pageBoundary = 0;
             if (TxtUtils.isNotEmpty(preText)) {
                 char last = preText.charAt(preText.length() - 1);
                 if (last == '-') {
                     preText = TxtUtils.replaceLast(preText, "-", "");
+                    pageBoundary = preText.length();
                     firstPart = preText + firstPart;
                 } else {
+                    pageBoundary = preText.length() + 1;
                     firstPart = preText + " " + firstPart;
                 }
             }
             final String preText1 = preText;
+            final boolean deferPageTurn = continuing && pageBoundary > 0
+                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                    && TTSEngine.get().hasRangeTiming();
+            final SpeechRequest request = new SpeechRequest(deferPageTurn ? pageBoundary : 0);
+            final AtomicBoolean pageTurned = new AtomicBoolean(false);
+            final Runnable turnPage = () -> {
+                if (speechPageGeneration.get() == speechGeneration && activePage == pageNumber
+                        && TTSEngine.get().isPlaybackRequested()
+                        && pageTurned.compareAndSet(false, true)) {
+                    EventBus.getDefault().post(new MessagePageNumber(pageNumber));
+                }
+            };
 
             if (Build.VERSION.SDK_INT >= 15) {
                 TTSEngine.get()
                          .getTTS()
                          .setOnUtteranceProgressListener(new UtteranceProgressListener() {
-                             @Override public void onStart(String utteranceId) {
-                                 LOG.d(TAG, "onUtteranceCompleted onStart", utteranceId);
+                             @Override public void onStart(String rawId) {
+                                 reportRange(rawId, 1, false);
                              }
 
-                             @Override public void onError(String utteranceId) {
-                                 LOG.d(TAG, "onUtteranceCompleted onError", utteranceId);
-                                 if (!utteranceId.equals(TTSEngine.UTTERANCE_ID_DONE)) {
-                                     return;
-                                 }
-                                 stopMediaSesstionAndReleaweWakeLock();
-                                 EventBus.getDefault()
-                                         .post(new TtsStatus());
+                             @Override public void onRangeStart(String rawId, int start, int end, int frame) {
+                                 reportRange(rawId, end, true);
                              }
 
-                             @Override public void onDone(String utteranceId) {
+                             private void reportRange(String rawId, int end, boolean timed) {
+                                 String signal = request.signal(rawId);
+                                 if (signal == null || speechPageGeneration.get() != speechGeneration) return;
+                                 if (timed) TTSEngine.get().noteRangeTiming(request);
+                                 if (deferPageTurn && request.reachesPage(signal, end)) turnPage.run();
+                             }
+
+                             @Override public void onError(String rawId) {
+                                 dispatch(rawId, signal -> stopMediaSesstionAndReleaweWakeLock());
+                             }
+
+                             private void dispatch(String rawId, java.util.function.Consumer<String> action) {
+                                 String signal = request.signal(rawId);
+                                 if (signal == null || speechExecutor.isShutdown()) return;
+                                 postSpeechTask(() -> {
+                                     if (speechPageGeneration.get() == speechGeneration) action.accept(signal);
+                                 });
+                             }
+
+                             @Override public void onDone(String rawId) {
+                                 dispatch(rawId, this::onDoneOwned);
+                             }
+
+                             private void onDoneOwned(String utteranceId) {
 
                                  LOG.d(TAG, "onUtteranceCompleted", utteranceId);
+                                 // Engines without range timing fall back to the containing utterance end.
+                                 if (deferPageTurn && request.reachesPage(utteranceId, Integer.MAX_VALUE)) {
+                                     turnPage.run();
+                                 }
                                  if (utteranceId.startsWith(TTSEngine.STOP_SIGNAL)) {
                                      stopMediaSesstionAndReleaweWakeLock();
 
@@ -1151,14 +1304,24 @@ import java.util.List;
 
                                  onPageSpeechFinished();
                                  setActiveParagraph(0);
-                                 playPage(secondPart, activePage + 1, null);
+                                 if (speechPageGeneration.get() == speechGeneration) {
+                                     playPage(secondPart, pageNumber + 1, null, true);
+                                 }
                              }
                          });
             } else {
                 TTSEngine.get()
                          .getTTS()
                          .setOnUtteranceCompletedListener(new OnUtteranceCompletedListener() {
-                             @Override public void onUtteranceCompleted(String utteranceId) {
+                             @Override public void onUtteranceCompleted(String rawId) {
+                                 String signal = request.signal(rawId);
+                                 if (signal == null || speechExecutor.isShutdown()) return;
+                                 postSpeechTask(() -> {
+                                     if (speechPageGeneration.get() == speechGeneration) onDoneOwned(signal);
+                                 });
+                             }
+
+                             private void onDoneOwned(String utteranceId) {
                                  if (utteranceId.startsWith(TTSEngine.STOP_SIGNAL)) {
                                      stopMediaSesstionAndReleaweWakeLock();
 
@@ -1190,15 +1353,25 @@ import java.util.List;
 
                                  onPageSpeechFinished();
                                  setActiveParagraph(0);
-                                 playPage(secondPart, activePage + 1, null);
+                                 if (speechPageGeneration.get() == speechGeneration) {
+                                     playPage(secondPart, pageNumber + 1, null, true);
+                                 }
                              }
                          });
             }
 
             onPageSpeechStarted(firstPart);
 
-            TTSEngine.get()
-                     .speek(firstPart);
+            if (speechPageGeneration.get() != speechGeneration) return;
+            boolean submitted = TTSEngine.get().speek(firstPart, continuing, request);
+            if (speechPageGeneration.get() != speechGeneration) return;
+            if (!submitted) {
+                stopMediaSesstionAndReleaweWakeLock();
+                return;
+            }
+
+            // Submit audio before synchronous page-turn subscribers can render the page.
+            if (!deferPageTurn) turnPage.run();
 
             TTSNotification.show(activeBookPath, pageNumber + 1, dc.getPageCount());
             LOG.d("TtsStatus send");
@@ -1220,6 +1393,8 @@ import java.util.List;
                 SharedBooks.saveAsync(load);
                 AppProfile.save(this);
             }, "@T TTS Save").start();
+
+            prepareNextPage(dc, pageNumber + 1);
         }
     }
 
@@ -1250,10 +1425,16 @@ import java.util.List;
         serviceRef = null;
         mMediaSessionCompat.release();
 
-        if (cache != null) {
-            cache.recycle();
-        }
-        path = null;
+        postSpeechTask(() -> {
+            if (cache != null) {
+                cache.recycle();
+                cache = null;
+            }
+            preparedDocument = null;
+            preparedText = null;
+            path = null;
+        });
+        speechExecutor.shutdown();
         LOG.d(TAG, "onDestroy:TTS playBookPage1");
     }
 
