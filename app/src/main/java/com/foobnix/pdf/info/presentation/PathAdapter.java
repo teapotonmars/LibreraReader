@@ -1,7 +1,7 @@
 package com.foobnix.pdf.info.presentation;
 
-import android.net.Uri;
-import android.provider.DocumentsContract;
+import android.content.Context;
+import com.foobnix.pdf.info.SafPathLabels;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.View.OnClickListener;
@@ -11,7 +11,6 @@ import android.widget.TextView;
 import android.widget.ImageView;
 import com.foobnix.pdf.info.TintUtil;
 
-import com.foobnix.android.utils.LOG;
 import com.foobnix.android.utils.ResultResponse;
 import com.foobnix.pdf.info.R;
 
@@ -21,6 +20,12 @@ import java.util.Comparator;
 import java.util.List;
 
 public class PathAdapter extends BaseAdapter {
+
+    private final Context context;
+
+    public PathAdapter(Context context) {
+        this.context = context;
+    }
 
     private List<String> paths = Collections.emptyList();
     private ResultResponse<String> onDeleClick;
@@ -47,25 +52,12 @@ public class PathAdapter extends BaseAdapter {
         notifyDataSetChanged();
     }
 
-    private static String displayNameFor(String path) {
-        if (path == null) return "";
-        if (path.startsWith("content://")) {
-            try {
-                return DocumentsContract.getTreeDocumentId(Uri.parse(path));
-            } catch (Exception e) {
-                LOG.e(e);
-                return path;
-            }
-        }
-        return path;
+    private String displayNameFor(String path) {
+        return SafPathLabels.displayName(context, path);
     }
 
-    private static final Comparator<String> comparator = new Comparator<String>() {
-        @Override
-        public int compare(String lhs, String rhs) {
-            return displayNameFor(lhs).compareTo(displayNameFor(rhs));
-        }
-    };
+    private final Comparator<String> comparator = (lhs, rhs) ->
+            displayNameFor(lhs).compareTo(displayNameFor(rhs));
 
     @Override
     public View getView(int position, View convertView, ViewGroup parent) {
@@ -74,7 +66,7 @@ public class PathAdapter extends BaseAdapter {
         TextView textPath = (TextView) browserItem.findViewById(R.id.browserPath);
         final String path = paths.get(position);
 
-        textPath.setText(displayNameFor(path));
+        SafPathLabels.bind(textPath, path);
 
         final View deleteView = browserItem.findViewById(R.id.delete);
         if (deleteView != null) {

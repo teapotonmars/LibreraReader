@@ -63,8 +63,13 @@ final class SafDocuments {
             }
         }
         List<Uri> accesses = new ArrayList<>(documents.size());
-        for (Document document : documents) accesses.add(document.uri);
+        java.util.Map<Uri, String> names = new java.util.LinkedHashMap<>();
+        for (Document document : documents) {
+            accesses.add(document.uri);
+            names.put(document.uri, document.name);
+        }
         SafDocumentIdentity.rememberAll(context, accesses);
+        com.foobnix.pdf.info.SafPathLabels.rememberChildren(context, parent, names);
         return documents;
     }
 }
