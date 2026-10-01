@@ -349,6 +349,24 @@ public class AppDB {
         if (cached != null) cached.setIsRecentProgress(progress);
     }
 
+    /** Refresh a list row only if its progress has not changed since the list was read. */
+    public FileMeta refreshReadingProgress(String path, Float previous, float progress,
+                                           Long previousTime, long time, boolean updateTime) {
+        FileMetaDao dao = fileMetaDao;
+        if (dao == null) return null;
+        if (updateTime) {
+            dao.getDatabase().execSQL("UPDATE FILE_META SET IS_RECENT_PROGRESS=?,IS_RECENT_TIME=? "
+                            + "WHERE PATH=? AND IS_RECENT_PROGRESS IS ? AND IS_RECENT_TIME IS ?",
+                    new Object[]{progress, time, path, previous, previousTime});
+        } else {
+            dao.getDatabase().execSQL("UPDATE FILE_META SET IS_RECENT_PROGRESS=? "
+                            + "WHERE PATH=? AND IS_RECENT_PROGRESS IS ?",
+                    new Object[]{progress, path, previous});
+        }
+        dao.detachAll();
+        return dao.load(path);
+    }
+
     public void initializeReadingProgress(String path, float progress, long time) {
         FileMetaDao dao = fileMetaDao;
         if (dao == null) return;
