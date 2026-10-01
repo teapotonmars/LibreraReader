@@ -24,6 +24,8 @@ public class TTSBookIdentityTest {
         TTSService live = created.get();
         live.activeBookPath = "/cache/a-v1.epub";
         live.activeBookIdentity = "content://books/document/a";
+        live.activePage = 15;
+        live.activeParagraph = 3;
         try {
             reference.set(null, live);
             settings.lastBookPath = "/cache/b.epub";
@@ -32,6 +34,14 @@ public class TTSBookIdentityTest {
             assertEquals(live.activeBookIdentity,
                     TTSNotification.originalUriForPath(live.activeBookPath));
             org.junit.Assert.assertNull(TTSNotification.originalUriForPath(settings.lastBookPath));
+            assertEquals(TTSService.ReaderTtsAction.RESUME,
+                    TTSService.readerAction("content://books/document/a",
+                            live.activeBookIdentity, false, false));
+            live.restoreActivePosition();
+            assertEquals("/cache/a-v1.epub", settings.lastBookPath);
+            assertEquals("content://books/document/a", settings.lastBookOriginalUri);
+            assertEquals(15, settings.lastBookPage);
+            assertEquals(3, settings.lastBookParagraph);
         } finally {
             reference.set(null, oldService);
             settings.lastBookPath = oldPath;
