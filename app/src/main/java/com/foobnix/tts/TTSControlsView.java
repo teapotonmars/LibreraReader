@@ -314,6 +314,7 @@ public class TTSControlsView extends FrameLayout {
 
     public void setDC(DocumentController dc) {
         controller = dc;
+        TTSService.onReaderOpened(dc);
     }
 
     /**

@@ -329,7 +329,8 @@ public class SearchAllBooksWorker extends MessageWorker {
             Tags2.updateTagsDB();
             if (isStopped()) return false;
             updateBookAnnotations();
-            return ScanOwnership.isCurrent(scanGeneration, this::isStopped);
+            return ScanOwnership.write(scanGeneration, this::isStopped,
+                    () -> CoverWarmupWorker.run(getApplicationContext()));
         } finally {
             Prefs.get().remove(errorID, 0);
             handler.removeCallbacksAndMessages(null);

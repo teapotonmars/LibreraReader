@@ -185,7 +185,7 @@ public class LibreraAppGlideModule extends AppGlideModule {
 //        builder.setDiskCache(new DiskLruCacheFactory(f.getPath(), diskCacheSizeBytes));
 
 
-        int coverThreads = 1;
+        int coverThreads = 2;
         builder.setSourceExecutor(
                 newSourceBuilder()
 
