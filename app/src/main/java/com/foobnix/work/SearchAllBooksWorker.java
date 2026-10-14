@@ -66,7 +66,7 @@ public class SearchAllBooksWorker extends MessageWorker {
     List<FileMeta> itemsMeta;
     private long scanGeneration;
 
-    private static final class MetadataTask {
+    static final class MetadataTask {
         final FileMeta found, baseline;
         final SafOpfRegistry.Entry sidecar;
         final String revision, revisionKey;
@@ -80,7 +80,7 @@ public class SearchAllBooksWorker extends MessageWorker {
         }
     }
 
-    private static final class MetadataResult {
+    static final class MetadataResult {
         final MetadataTask task;
         final FileMeta extracted;
         final boolean extractionSucceeded;
@@ -331,65 +331,6 @@ public class SearchAllBooksWorker extends MessageWorker {
         }
     }
 
-    boolean publishLocalMetadata(FileMeta found, FileMeta baseline, long owner,
-                                 java.util.function.BooleanSupplier stopped) {
-        return publishLocalMetadata(found, baseline, owner, stopped, new boolean[1]);
-    }
-
-    boolean publishLocalMetadata(FileMeta found, FileMeta baseline, long owner,
-                                 java.util.function.BooleanSupplier stopped,
-                                 boolean[] extractionSucceededResult) {
-        FileMeta extracted = new FileMeta(found.getPath());
-        File file = new File(found.getPath());
-        FileMetaCore.get().upadteBasicMeta(extracted, file);
-        boolean extractionSucceeded = false;
-        try {
-            EbookMeta metadata = readLocalMetadata(file);
-            FileMetaCore.get().udpateFullMeta(extracted, metadata);
-            extractionSucceeded = true;
-        } catch (Exception failure) { LOG.e(failure); }
-        boolean completed = extractionSucceeded;
-        boolean published = ScanOwnership.write(owner, stopped,
-                () -> AppDB.get().updateScannedMetadata(extracted, baseline, completed));
-        extractionSucceededResult[0] = published && completed;
-        return published;
-    }
-
-    boolean publishSafMetadata(FileMeta found, FileMeta baseline, long owner,
-                               java.util.function.BooleanSupplier stopped) {
-        return publishSafMetadata(found, baseline, null, owner, stopped);
-    }
-
-    boolean publishSafMetadata(FileMeta found, FileMeta baseline, SafOpfRegistry.Entry sidecar,
-                               long owner, java.util.function.BooleanSupplier stopped) {
-        return publishSafMetadata(found, baseline, sidecar, owner, stopped, new boolean[1]);
-    }
-
-    boolean publishSafMetadata(FileMeta found, FileMeta baseline, SafOpfRegistry.Entry sidecar,
-                               long owner, java.util.function.BooleanSupplier stopped,
-                               boolean[] extractionSucceededResult) {
-        FileMeta extracted = new FileMeta(found.getPath());
-        extracted.setTitle(found.getTitle());
-        extracted.setPathTxt(found.getPathTxt());
-        extracted.setSize(found.getSize());
-        extracted.setDate(found.getDate());
-        extracted.setExt(found.getExt());
-        extracted.setState(FileMetaCore.STATE_BASIC);
-        boolean extractionSucceeded = false;
-        try {
-            EbookMeta metadata = readSafMetadataForScan(found, sidecar);
-            FileMetaCore.get().udpateFullMeta(extracted, metadata);
-            if (TxtUtils.isEmpty(extracted.getTitle()) || extracted.getTitle().startsWith("saf_"))
-                extracted.setTitle(found.getTitle());
-            extractionSucceeded = true;
-        } catch (Exception failure) { LOG.e(failure); }
-        boolean completed = extractionSucceeded;
-        boolean published = ScanOwnership.write(owner, stopped,
-                () -> AppDB.get().updateScannedMetadata(extracted, baseline, completed));
-        extractionSucceededResult[0] = published && completed;
-        return published;
-    }
-
     protected EbookMeta readSafMetadataForScan(FileMeta found) throws Exception {
         try (SafFileLink link = new SafFileLink(getApplicationContext(),
                 Uri.parse(found.getPath()), found.getPathTxt())) {
@@ -397,7 +338,7 @@ public class SearchAllBooksWorker extends MessageWorker {
         }
     }
 
-    private MetadataResult extractMetadata(MetadataTask task) {
+    MetadataResult extractMetadata(MetadataTask task) {
         FileMeta found = task.found;
         FileMeta extracted = new FileMeta(found.getPath());
         boolean extractionSucceeded = false;

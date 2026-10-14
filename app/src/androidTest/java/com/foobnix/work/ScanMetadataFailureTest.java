@@ -67,7 +67,7 @@ public class ScanMetadataFailureTest {
                 AppDB.get().saveAll(Collections.singletonList(old));
                 FileMeta found = new FileMeta(book.getPath());
                 found.setTitle(book.getName());
-                assertTrue(new SearchAllBooksWorker(context, parameters()).publishLocalMetadata(
+                assertTrue(publish(new SearchAllBooksWorker(context, parameters()), 
                         found, AppDB.get().load(book.getPath()), ScanOwnership.claim(), () -> false));
                 FileMeta retained = AppDB.get().load(book.getPath());
                 assertEquals(extension, "Known " + extension, retained.getTitle());
@@ -97,7 +97,7 @@ public class ScanMetadataFailureTest {
             FileMeta found = new FileMeta(book.getPath());
             found.setTitle(book.getName());
             long owner = ScanOwnership.claim();
-            assertTrue(new SearchAllBooksWorker(context, parameters()).publishLocalMetadata(
+            assertTrue(publish(new SearchAllBooksWorker(context, parameters()), 
                     found, AppDB.get().load(book.getPath()), owner, () -> false));
             FileMeta retained = AppDB.get().load(book.getPath());
             assertEquals("Known title", retained.getTitle());
@@ -131,7 +131,7 @@ public class ScanMetadataFailureTest {
         found.setTitle("Discovered title");
         found.setSize(20L);
         long oldOwner = ScanOwnership.claim();
-        Thread scan = new Thread(() -> published.set(worker.publishSafMetadata(
+        Thread scan = new Thread(() -> published.set(publish(worker, 
                 found, AppDB.get().load(path), oldOwner, () -> false)));
         try {
             scan.start();
@@ -150,6 +150,79 @@ public class ScanMetadataFailureTest {
         }
     }
 
+
+    @Test public void settingsChangedDuringExtractionRejectTheProductionResult() throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        AppProfile.init(context);
+        boolean oldNames = AppState.get().isShowOnlyOriginalFileNames;
+        File source = File.createTempFile("scan-settings-", ".fb2", context.getCacheDir());
+        try {
+            FileMeta old = new FileMeta(source.getPath()); old.setTitle("Keep this title");
+            AppDB.get().saveAll(Collections.singletonList(old));
+            FileMeta baseline = AppDB.get().scanSnapshot().stream()
+                    .filter(row -> source.getPath().equals(row.getPath())).findFirst().get();
+            SearchAllBooksWorker worker = new SearchAllBooksWorker(context, parameters()) {
+                @Override protected EbookMeta readLocalMetadata(File file) {
+                    AppState.get().isShowOnlyOriginalFileNames = !oldNames;
+                    return new EbookMeta("Obsolete settings title", "Author");
+                }
+            };
+            publish(worker, new FileMeta(source.getPath()), baseline, ScanOwnership.claim(), () -> false);
+            assertEquals("Keep this title", AppDB.get().load(source.getPath()).getTitle());
+        } finally {
+            AppState.get().isShowOnlyOriginalFileNames = oldNames;
+            AppDB.get().deleteBy(source.getPath()); source.delete();
+        }
+    }
+
+    @Test public void userEditsDuringExtractionSurviveProductionPublication() throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        AppProfile.init(context);
+        File source = File.createTempFile("scan-user-edits-", ".fb2", context.getCacheDir());
+        try {
+            FileMeta old = new FileMeta(source.getPath()); old.setTitle("Before"); old.setAuthor("Before author");
+            AppDB.get().saveAll(Collections.singletonList(old));
+            FileMeta baseline = AppDB.get().scanSnapshot().stream()
+                    .filter(row -> source.getPath().equals(row.getPath())).findFirst().get();
+            SearchAllBooksWorker worker = new SearchAllBooksWorker(context, parameters()) {
+                @Override protected EbookMeta readLocalMetadata(File file) {
+                    FileMeta edit = AppDB.get().load(file.getPath());
+                    edit.setTitle("User title"); edit.setIsStar(true); AppDB.get().save(edit);
+                    AppDB.get().updateReadingProgress(file.getPath(), 0.75f);
+                    return new EbookMeta("Extracted title", "Extracted author");
+                }
+            };
+            assertTrue(publish(worker, new FileMeta(source.getPath()), baseline, ScanOwnership.claim(), () -> false));
+            FileMeta result = AppDB.get().load(source.getPath());
+            assertEquals("User title", result.getTitle()); assertEquals("Extracted author", result.getAuthor());
+            assertEquals(Boolean.TRUE, result.getIsStar()); assertEquals(0.75f, result.getIsRecentProgress(), 0.001f);
+        } finally { AppDB.get().deleteBy(source.getPath()); source.delete(); }
+    }
+
+    private static boolean publish(SearchAllBooksWorker worker, FileMeta found, FileMeta baseline,
+                                   long owner, java.util.function.BooleanSupplier stopped) {
+        return publish(worker, found, baseline, null, owner, stopped, new boolean[1]);
+    }
+    private static boolean publish(SearchAllBooksWorker worker, FileMeta found, FileMeta baseline,
+                                   long owner, java.util.function.BooleanSupplier stopped, boolean[] acknowledged) {
+        return publish(worker, found, baseline, null, owner, stopped, acknowledged);
+    }
+    private static boolean publish(SearchAllBooksWorker worker, FileMeta found, FileMeta baseline,
+                                   SafOpfRegistry.Entry sidecar, long owner,
+                                   java.util.function.BooleanSupplier stopped) {
+        return publish(worker, found, baseline, sidecar, owner, stopped, new boolean[1]);
+    }
+    private static boolean publish(SearchAllBooksWorker worker, FileMeta found, FileMeta baseline,
+                                   SafOpfRegistry.Entry sidecar, long owner,
+                                   java.util.function.BooleanSupplier stopped, boolean[] acknowledged) {
+        String settings = MetadataRefreshPolicy.settingsKey();
+        var task = new SearchAllBooksWorker.MetadataTask(found, baseline, sidecar, null, null);
+        var result = worker.extractMetadata(task);
+        boolean published = SearchAllBooksWorker.publishMetadataResult(owner, stopped, result.extracted,
+                result.task.baseline, result.extractionSucceeded, null, null, null, settings);
+        acknowledged[0] = published && result.extractionSucceeded;
+        return published;
+    }
 
     private static WorkerParameters parameters() {
         return new WorkerParameters(UUID.randomUUID(), Data.EMPTY, Collections.emptyList(),
@@ -209,7 +282,7 @@ public class ScanMetadataFailureTest {
                     AppDB.get().load(path).getState().intValue());
             ControlledWorker worker = new ControlledWorker(context);
             long owner = ScanOwnership.claim();
-            assertTrue(worker.publishSafMetadata(found, AppDB.get().load(path), owner, () -> false));
+            assertTrue(publish(worker, found, AppDB.get().load(path), owner, () -> false));
             FileMeta failed = AppDB.get().load(path);
             assertEquals("Known provider title", failed.getTitle());
             assertEquals("Known provider author", failed.getAuthor());
@@ -217,7 +290,7 @@ public class ScanMetadataFailureTest {
             assertEquals(FileMetaCore.STATE_FULL, failed.getState().intValue());
             assertEquals(Boolean.TRUE, failed.getIsStar());
             worker.fail = false;
-            assertTrue(worker.publishSafMetadata(found, failed, owner, () -> false));
+            assertTrue(publish(worker, found, failed, owner, () -> false));
             FileMeta recovered = AppDB.get().load(path);
             assertEquals("Provider recovered", recovered.getTitle());
             assertTrue(recovered.getAuthor().contains("Writer"));
@@ -254,11 +327,11 @@ public class ScanMetadataFailureTest {
             ControlledWorker worker = new ControlledWorker(context);
             long owner = ScanOwnership.claim();
             FileMeta baseline = AppDB.get().load(path);
-            assertTrue(worker.publishSafMetadata(found, baseline, owner, () -> false));
+            assertTrue(publish(worker, found, baseline, owner, () -> false));
             FileMeta afterFailure = AppDB.get().load(path);
             assertEquals(FileMetaCore.STATE_BASIC, afterFailure.getState().intValue());
             worker.fail = false;
-            assertTrue(worker.publishSafMetadata(found, afterFailure, owner, () -> false));
+            assertTrue(publish(worker, found, afterFailure, owner, () -> false));
             FileMeta recovered = AppDB.get().load(path);
             assertEquals(FileMetaCore.STATE_FULL, recovered.getState().intValue());
             assertEquals("New SAF title", recovered.getTitle());
@@ -299,7 +372,7 @@ public class ScanMetadataFailureTest {
             ControlledWorker worker = new ControlledWorker(context);
             worker.fail = false;
             long owner = ScanOwnership.claim();
-            assertTrue(worker.publishSafMetadata(found, AppDB.get().load(path), sidecar,
+            assertTrue(publish(worker, found, AppDB.get().load(path), sidecar,
                     owner, () -> false));
             FileMeta afterFailure = AppDB.get().load(path);
             assertEquals("Known Calibre title", afterFailure.getTitle());
@@ -308,7 +381,7 @@ public class ScanMetadataFailureTest {
                 output.write("<package><metadata><dc:title xmlns:dc='http://purl.org/dc/elements/1.1/'>Partial title</dc:title><broken"
                         .getBytes(StandardCharsets.UTF_8));
             }
-            assertTrue(worker.publishSafMetadata(found, afterFailure, sidecar,
+            assertTrue(publish(worker, found, afterFailure, sidecar,
                     owner, () -> false));
             FileMeta afterMalformed = AppDB.get().load(path);
             assertEquals("Known Calibre title", afterMalformed.getTitle());
@@ -319,7 +392,7 @@ public class ScanMetadataFailureTest {
                         + "<dc:creator>Recovered author</dc:creator></metadata></package>")
                         .getBytes(StandardCharsets.UTF_8));
             }
-            assertTrue(worker.publishSafMetadata(found, afterMalformed, sidecar,
+            assertTrue(publish(worker, found, afterMalformed, sidecar,
                     owner, () -> false));
             FileMeta recovered = AppDB.get().load(path);
             assertEquals("Recovered Calibre title", recovered.getTitle());
@@ -361,7 +434,7 @@ public class ScanMetadataFailureTest {
             ControlledWorker worker = new ControlledWorker(context);
             long owner = ScanOwnership.claim();
             boolean[] acknowledged = new boolean[1];
-            assertTrue(worker.publishLocalMetadata(found, AppDB.get().load(book.getPath()),
+            assertTrue(publish(worker, found, AppDB.get().load(book.getPath()),
                     owner, () -> false, acknowledged));
             assertFalse("A failed extraction must remain due for retry", acknowledged[0]);
             FileMeta afterFailure = AppDB.get().load(book.getPath());
@@ -372,7 +445,7 @@ public class ScanMetadataFailureTest {
             assertEquals(Boolean.TRUE, afterFailure.getIsStar());
             assertEquals(Long.valueOf(book.length()), afterFailure.getSize());
             worker.fail = false;
-            assertTrue(worker.publishLocalMetadata(found, afterFailure,
+            assertTrue(publish(worker, found, afterFailure,
                     owner, () -> false, acknowledged));
             assertTrue(acknowledged[0]);
             FileMeta recovered = AppDB.get().load(book.getPath());
