@@ -103,6 +103,14 @@ public class SafStagingCacheTest {
         assertFalse(reserved.exists());
     }
 
+    @Test public void missingProviderNameDoesNotRegisterAFallbackAsAReadingKey() throws Exception {
+        provider.displayName = null;
+        File staged = ExtUtils.stageSafFile(context, uri, "fallback.pdf");
+        try {
+            assertEquals(DocumentsContract.getDocumentId(uri), ReadingKey.of(uri.toString()));
+        } finally { BookCacheLeases.cancelReservation(staged); }
+    }
+
     @Test public void unchangedRevisionReusesCompleteDownloadedBook() throws Exception {
         File first = ExtUtils.stageSafFile(context, uri, "fallback.pdf");
         File second = ExtUtils.stageSafFile(context, uri, "fallback.pdf");

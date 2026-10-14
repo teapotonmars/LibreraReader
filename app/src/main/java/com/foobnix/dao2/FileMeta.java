@@ -82,6 +82,7 @@ public class FileMeta {
         this.dateTxt = dateTxt;
         this.sizeTxt = sizeTxt;
         this.pathTxt = pathTxt;
+        com.foobnix.pdf.info.ReadingKey.remember(path, pathTxt);
         this.isStar = isStar;
         this.isStarTime = isStarTime;
         this.isRecent = isRecent;
@@ -225,6 +226,7 @@ public class FileMeta {
 
     public void setPathTxt(String pathTxt) {
         this.pathTxt = pathTxt;
+        com.foobnix.pdf.info.ReadingKey.remember(path, pathTxt);
     }
 
     public Boolean getIsStar() {

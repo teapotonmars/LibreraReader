@@ -59,6 +59,28 @@ public class TTSBookIdentityTest {
         }
     }
 
+    @Test public void ttsResumeSharesTheProviderFilenameKeyWithBothReaders() {
+        AppSP settings = AppSP.get();
+        String oldPath = settings.lastBookPath, oldOriginal = settings.lastBookOriginalUri;
+        String name = "tts-" + java.util.UUID.randomUUID() + ".epub";
+        String identity = "content://tts-test/document/42";
+        com.foobnix.pdf.info.ReadingKey.remember(identity, name);
+        var saved = new com.foobnix.model.AppBook("/Attachments/" + name);
+        saved.p = 0.5f;
+        org.ebookdroid.common.settings.books.SharedBooks.cache.put(name, saved);
+        try {
+            settings.lastBookOriginalUri = identity;
+            for (String extension : new String[]{".epub", ".pdf"}) {
+                settings.lastBookPath = "/cache/staged" + extension;
+                assertEquals(name, com.foobnix.pdf.info.ReadingKey.of(TTSService.bookIdentity()));
+                assertEquals(0.5f, org.ebookdroid.common.settings.books.SharedBooks.load(TTSService.bookIdentity()).p, 0.001f);
+            }
+        } finally {
+            settings.lastBookPath = oldPath; settings.lastBookOriginalUri = oldOriginal;
+            org.ebookdroid.common.settings.books.SharedBooks.cache.remove(name);
+        }
+    }
+
     @Test public void notificationReopensPhysicalFileWithOriginalIdentity() {
         AppSP settings = AppSP.get();
         String oldPath = settings.lastBookPath;

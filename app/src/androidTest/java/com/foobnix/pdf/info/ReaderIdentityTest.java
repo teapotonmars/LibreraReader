@@ -39,8 +39,8 @@ public class ReaderIdentityTest {
     }
 
     @After public void tearDown() {
-        org.ebookdroid.common.settings.books.SharedBooks.cache.remove(ExtUtils.getFileName(original));
-        org.ebookdroid.common.settings.books.SharedBooks.cache.remove(ExtUtils.getFileName(staged));
+        org.ebookdroid.common.settings.books.SharedBooks.cache.remove(ReadingKey.of(original));
+        org.ebookdroid.common.settings.books.SharedBooks.cache.remove(ReadingKey.of(staged));
         AppDB.get().deleteBy(original);
         AppDB.get().deleteBy(staged);
     }
@@ -94,13 +94,13 @@ public class ReaderIdentityTest {
         com.foobnix.model.AppBook previous = org.ebookdroid.common.settings.SettingsManager.getBookSettings();
         com.foobnix.model.AppBook saved = new com.foobnix.model.AppBook(original);
         saved.p = 0.75f;
-        org.ebookdroid.common.settings.books.SharedBooks.cache.put(ExtUtils.getFileName(original), saved);
+        org.ebookdroid.common.settings.books.SharedBooks.cache.put(ReadingKey.of(original), saved);
         try {
             assertSame(saved, org.ebookdroid.common.settings.SettingsManager.getBookSettings(intent, staged));
             assertSame(saved, org.ebookdroid.common.settings.SettingsManager.getBookSettings(intent, staged + "-new-version"));
             assertEquals(0.75f, org.ebookdroid.common.settings.SettingsManager.getBookSettings().p, 0.001f);
         } finally {
-            org.ebookdroid.common.settings.books.SharedBooks.cache.remove(ExtUtils.getFileName(original));
+            org.ebookdroid.common.settings.books.SharedBooks.cache.remove(ReadingKey.of(original));
             if (previous != null) org.ebookdroid.common.settings.SettingsManager.getBookSettings(previous.path);
         }
     }
@@ -120,29 +120,25 @@ public class ReaderIdentityTest {
         } finally { AppDB.get().deleteBy(source.getPath()); source.delete(); }
     }
 
-    private void checkLegacyProgress(float canonicalProgress, long canonicalTime, float expected) {
-        var manager = org.ebookdroid.common.settings.SettingsManager.getBookSettings();
-        var canonical = new com.foobnix.model.AppBook(original);
-        canonical.p = canonicalProgress; canonical.t = canonicalTime;
-        var legacy = new com.foobnix.model.AppBook(staged);
-        legacy.p = 0.6f; legacy.t = 100; legacy.cp = true; legacy.z = 150;
-        org.ebookdroid.common.settings.books.SharedBooks.cache.put(ExtUtils.getFileName(original), canonical);
-        org.ebookdroid.common.settings.books.SharedBooks.cache.put(ExtUtils.getFileName(staged), legacy);
+    @Test public void readerRestoresMasterFilenameStateInBothModes() {
+        var previous = org.ebookdroid.common.settings.SettingsManager.getBookSettings();
+        var saved = new com.foobnix.model.AppBook("/Attachments/" + book.getPathTxt());
+        saved.p = 0.6f; saved.t = 100;
+        org.ebookdroid.common.settings.books.SharedBooks.cache.put(ReadingKey.of(saved.path), saved);
         try {
-            var restored = org.ebookdroid.common.settings.SettingsManager.getBookSettings(intent, staged);
-            assertEquals(original, restored.path); assertEquals(expected, restored.p, 0.001f);
-            if (canonicalTime == 0 && canonicalProgress == 0) {
-                assertTrue(restored.cp); assertEquals(150, restored.z); assertEquals(100, restored.t);
+            for (String extension : new String[]{".pdf", ".epub"}) {
+                String local = staged + extension;
+                intent.setData(Uri.fromFile(new java.io.File(local)));
+                SafReaderLaunch.attach(InstrumentationRegistry.getInstrumentation().getTargetContext(), intent, original);
+                assertEquals(0.6f, org.ebookdroid.common.settings.SettingsManager.getBookSettings(intent, local).p, 0.001f);
+                assertEquals(original, saved.path);
             }
-            assertEquals(staged, legacy.path); assertEquals(0.6f, legacy.p, 0.001f);
         } finally {
-            if (manager != null) org.ebookdroid.common.settings.SettingsManager.getBookSettings(manager.path);
+            org.ebookdroid.common.settings.books.SharedBooks.cache.remove(ReadingKey.of(original));
+            if (previous != null) org.ebookdroid.common.settings.SettingsManager.getBookSettings(previous.path);
         }
     }
 
-    @Test public void legacyStagedReadingStateSeedsAnUnusedOriginalEntry() { checkLegacyProgress(0, 0, 0.6f); }
-    @Test public void canonicalSavedProgressIsNotOverwrittenByLegacyStagedState() { checkLegacyProgress(0.2f, 200, 0.2f); }
-    @Test public void explicitlySavedZeroProgressIsNotOverwrittenByLegacyState() { checkLegacyProgress(0, 200, 0); }
     @Test public void exportedReaderRejectsForgedOrChangedIdentityExtras() {
         Intent forged = new Intent().setData(intent.getData()).putExtra("SAF_ORIGINAL_URI", original);
         assertEquals(staged, ExtUtils.recentPathFromIntent(forged, staged));

@@ -335,7 +335,7 @@ public class BookmarksFragment2 extends UIFragment<AppBookmark> {
                 BookmarksData.get().remove(result);
                 populate();
             } else {
-                ExtUtils.sendBookmarksTo(getActivity(), new File(result.getPath()));
+                ExtUtils.sendBookmarksTo(getActivity(), com.foobnix.ui2.AppDB.get().getOrCreate(result.getPath()));
             }
             return false;
         }

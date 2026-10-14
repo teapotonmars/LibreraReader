@@ -128,7 +128,7 @@ public class ExportConverter {
             if (appBook.p > 1) {
                 appBook.p = 0;
             }
-            final String fileName = ExtUtils.getFileName(appBook.path);
+            final String fileName = com.foobnix.pdf.info.ReadingKey.of(appBook.path);
             resObj.put(fileName, Objects.toJSONObject(appBook));
         }
         IO.writeObj(AppProfile.syncProgress, resObj);

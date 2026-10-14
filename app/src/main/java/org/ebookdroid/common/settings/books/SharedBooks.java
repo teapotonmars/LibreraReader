@@ -233,7 +233,7 @@ public class SharedBooks {
         cache.clear();
         for (File fileName : AppProfile.getAllFiles(AppProfile.APP_PROGRESS_JSON)) {
             LinkedJSONObject linkedJsonObject = IO.readJsonObject(fileName);
-            String key = ExtUtils.getFileName(path);
+            String key = com.foobnix.pdf.info.ReadingKey.of(path);
             if (linkedJsonObject.has(key)) {
                 linkedJsonObject.remove(key);
                 IO.writeObjSync(fileName, linkedJsonObject);
@@ -249,7 +249,7 @@ public class SharedBooks {
         // Saving keys by that name, so a cache keyed by path was never the one a save updated:
         // a book closed at a new page went on being read back at the old one until something
         // else cleared the cache.
-        final String key = ExtUtils.getFileName(fileName);
+        final String key = com.foobnix.pdf.info.ReadingKey.of(fileName);
         AppBook cached = cache.get(key);
         if (cached != null) {
             LOG.d("SharedBooks-load-from-cache", fileName);
@@ -296,7 +296,7 @@ public class SharedBooks {
         try {
 
             LOG.d("SharedBooks-load", bs.path);
-            final String key = ExtUtils.getFileName(fileName);
+            final String key = com.foobnix.pdf.info.ReadingKey.of(fileName);
             if (!obj.has(key)) {
                 return bs;
             }
@@ -327,7 +327,7 @@ public class SharedBooks {
             return;
         }
 
-        if (!hasChanged(ExtUtils.getFileName(bs.path), bs.hashCode())) {
+        if (!hasChanged(com.foobnix.pdf.info.ReadingKey.of(bs.path), bs.hashCode())) {
             LOG.d("SharedBooks-Save", "skip", bs.path);
             return;
         }
@@ -340,7 +340,7 @@ public class SharedBooks {
                 bs.p = 0;
             }
 
-            final String fileName = ExtUtils.getFileName(bs.path);
+            final String fileName = com.foobnix.pdf.info.ReadingKey.of(bs.path);
             final LinkedJSONObject value = Objects.toJSONObject(bs);
             obj.put(fileName, value);
             cache.put(fileName, bs);

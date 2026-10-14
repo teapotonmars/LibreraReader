@@ -348,6 +348,7 @@ public class ExtUtils {
     }
 
     public static void openFile(Activity a, FileMeta meta) {
+        ReadingKey.remember(meta);
         if (ArchiveMemberIdentity.isIdentity(meta.getPath())) {
             String source = ArchiveMemberIdentity.source(meta.getPath());
             String entry = ArchiveMemberIdentity.entry(meta.getPath());
@@ -419,7 +420,10 @@ public class ExtUtils {
                 int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
                 int sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE);
                 int modifiedIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED);
-                if (nameIndex >= 0 && !cursor.isNull(nameIndex)) displayName = cursor.getString(nameIndex);
+                if (nameIndex >= 0 && !cursor.isNull(nameIndex)) {
+                    displayName = cursor.getString(nameIndex);
+                    ReadingKey.remember(uri.toString(), displayName);
+                }
                 if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) size = cursor.getLong(sizeIndex);
                 if (modifiedIndex >= 0 && !cursor.isNull(modifiedIndex)) modified = cursor.getLong(modifiedIndex);
             }
@@ -791,7 +795,7 @@ public class ExtUtils {
     }
 
     public static boolean isEqualFileNames(String name1, String name2) {
-        return getFileName(name1).equals(getFileName(name2));
+        return ReadingKey.of(name1).equals(ReadingKey.of(name2));
     }
 
     public static String getFileName(String name) {
@@ -1578,7 +1582,17 @@ public class ExtUtils {
             return;
         }
 
-        final List<AppBookmark> bookmarksByBook = BookmarksData.get().getBookmarksByBook(file);
+        sendBookmarksTo(a, readerBookMeta(a.getIntent(), file.getPath()));
+    }
+
+    public static void sendBookmarksTo(final Activity a, final FileMeta libraryBook) {
+        String identity = libraryBook.getPath();
+        if (!isExteralSD(identity) && !ArchiveMemberIdentity.isIdentity(identity)
+                && !isValidFile(new File(identity))) {
+            Toast.makeText(a, R.string.file_not_found, Toast.LENGTH_LONG).show();
+            return;
+        }
+        final List<AppBookmark> bookmarksByBook = BookmarksData.get().getBookmarksByBook(identity);
 
         final Intent intent = new Intent(Intent.ACTION_SEND);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -1587,7 +1601,7 @@ public class ExtUtils {
         if (bookmarksByBook != null && !bookmarksByBook.isEmpty()) {
             final StringBuilder result = new StringBuilder();
             //result.append(a.getString(R.string.bookmarks) + "\n\n");
-            result.append(file.getName() + "\n\n");
+            result.append(ReadingKey.of(identity) + "\n\n");
             int number = 1;
             for (final AppBookmark book : bookmarksByBook) {
                 result.append(String.format("%s. %s\n", number++, book.getText().trim()));

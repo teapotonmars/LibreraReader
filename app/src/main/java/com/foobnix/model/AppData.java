@@ -48,7 +48,7 @@ public class AppData {
 
     public static boolean contains(List<FileMeta> list, String path) {
         for (FileMeta f : list) {
-            if (ExtUtils.getFileName(f.getPath()).equals(ExtUtils.getFileName(path))) {
+            if (com.foobnix.pdf.info.ReadingKey.of(f.getPath()).equals(com.foobnix.pdf.info.ReadingKey.of(path))) {
                 return true;
             }
         }
@@ -207,7 +207,7 @@ public class AppData {
             final Iterator<SimpleMeta> iterator = res.iterator();
             while (iterator.hasNext()) {
                 SimpleMeta it = iterator.next();
-                if (ExtUtils.getFileName(it.getPath()).equals(ExtUtils.getFileName(meta.getPath()))) {
+                if (com.foobnix.pdf.info.ReadingKey.of(it.getPath()).equals(com.foobnix.pdf.info.ReadingKey.of(meta.getPath()))) {
                     iterator.remove();
                     find = true;
                 }

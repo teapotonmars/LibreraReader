@@ -43,7 +43,7 @@ public class ReaderLifecycleTest {
         original = "content://reader-lifecycle/document/" + UUID.randomUUID();
         FileMeta meta = AppDB.get().getOrCreate(original); meta.setTitle("Fluent Python"); meta.setPathTxt("Fluent Python.pdf"); AppDB.get().save(meta);
         AppBook saved = new AppBook(original); saved.p = 0.75f;
-        SharedBooks.cache.put(ExtUtils.getFileName(original), saved);
+        SharedBooks.cache.put(com.foobnix.pdf.info.ReadingKey.of(original), saved);
         InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
             Activity activity = new Activity();
             Intent launch = new Intent().setData(android.net.Uri.fromFile(new File("/fixture/source-version-1.pdf")));
@@ -53,7 +53,7 @@ public class ReaderLifecycleTest {
         });
     }
     @After public void tearDown() {
-        SharedBooks.cache.remove(ExtUtils.getFileName(original)); AppDB.get().deleteBy(original);
+        SharedBooks.cache.remove(com.foobnix.pdf.info.ReadingKey.of(original)); AppDB.get().deleteBy(original);
         AppSP.get().lastBookPath = priorPath; AppSP.get().lastBookOriginalUri = priorOriginal;
         AppSP.get().lastBookParagraph = priorTtsParagraph; AppSP.get().tempBookPage = priorTtsPage;
         TempHolder.get().loadingCancelled.set(priorCancellation);

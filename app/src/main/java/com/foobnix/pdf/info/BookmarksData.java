@@ -155,8 +155,8 @@ public class BookmarksData {
                     appBookmark.file = file;
                     final LinkedJSONObject local = obj.getJSONObject(next);
                     Objects.loadFromJson(appBookmark, local);
-                    String path1 = ExtUtils.getFileName(path);
-                    String path2 = ExtUtils.getFileName(appBookmark.getPath());
+                    String path1 = com.foobnix.pdf.info.ReadingKey.of(path);
+                    String path2 = com.foobnix.pdf.info.ReadingKey.of(appBookmark.getPath());
                     if (path1.equals(path2)) {
                         appBookmark.path = path;//update path
                         all.add(appBookmark);

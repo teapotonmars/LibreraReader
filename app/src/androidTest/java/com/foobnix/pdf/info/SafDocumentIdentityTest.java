@@ -33,7 +33,7 @@ public class SafDocumentIdentityTest {
                 .filter(row -> parent.toString().equals(row.getPath()))
                 .findFirst().orElseThrow(AssertionError::new).getIsStar()));
         AppBook progress = new AppBook(parent.toString()); progress.p = 0.6f; progress.t = 123L;
-        SharedBooks.cache.put(ExtUtils.getFileName(parent.toString()), progress);
+        SharedBooks.cache.put(com.foobnix.pdf.info.ReadingKey.of(parent.toString()), progress);
         try {
             FileMeta merged = AppDB.get().getOrCreate(child.toString());
             assertEquals(identity, merged.getPath());
@@ -53,7 +53,7 @@ public class SafDocumentIdentityTest {
             assertEquals(Uri.parse(identity), SafDocumentIdentity.accessCandidates(context, Uri.parse(identity)).get(0));
 
         } finally {
-            SharedBooks.cache.remove(ExtUtils.getFileName(identity));
+            SharedBooks.cache.remove(com.foobnix.pdf.info.ReadingKey.of(identity));
             AppDB.get().deleteBy(parent.toString()); AppDB.get().deleteBy(child.toString());
             AppDB.get().deleteBy(identity);
         }

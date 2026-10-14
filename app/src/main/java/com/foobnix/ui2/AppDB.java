@@ -274,6 +274,7 @@ public class AppDB {
     }
 
     public void save(FileMeta meta) {
+        com.foobnix.pdf.info.ReadingKey.remember(meta);
         fileMetaDao.save(meta);
     }
 
@@ -310,6 +311,7 @@ public class AppDB {
     }
 
     public void update(FileMeta load) {
+        com.foobnix.pdf.info.ReadingKey.remember(load);
         if (fileMetaDao != null) {
             fileMetaDao.save(load);
         }
@@ -328,7 +330,9 @@ public class AppDB {
         }
         if (ExtUtils.isExteralSD(path))
             path = SafDocumentIdentity.canonical(Uri.parse(path)).toString();
-        return fileMetaDao.load(path);
+        FileMeta row = fileMetaDao.load(path);
+        com.foobnix.pdf.info.ReadingKey.remember(row);
+        return row;
     }
 
     /** Update only reading progress, preserving concurrently extracted book metadata. */
@@ -370,6 +374,7 @@ public class AppDB {
             load.setState(FileMetaCore.STATE_NONE);
         }
 
+        com.foobnix.pdf.info.ReadingKey.remember(load);
         return load;
     }
 

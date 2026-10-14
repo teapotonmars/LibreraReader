@@ -90,7 +90,7 @@ public class ZipDialogTest {
             com.foobnix.model.AppBook progress = new com.foobnix.model.AppBook(identity);
             progress.p = 0.43f;
             org.ebookdroid.common.settings.books.SharedBooks.cache.put(
-                    ExtUtils.getFileName(identity), progress);
+                    com.foobnix.pdf.info.ReadingKey.of(identity), progress);
             assertSame(progress, org.ebookdroid.common.settings.SettingsManager
                     .getBookSettings(new android.content.Intent(), first.getPath()));
             AppBookmark bookmark = new AppBookmark();
@@ -98,8 +98,8 @@ public class ZipDialogTest {
             assertEquals(identity, bookmark.getPath());
             assertNotEquals(identity, ArchiveMemberIdentity.forExtractedFile(otherEntry));
             assertNotEquals(identity, ArchiveMemberIdentity.forExtractedFile(otherArchive));
-            assertNotEquals(ExtUtils.getFileName(identity),
-                    ExtUtils.getFileName(ArchiveMemberIdentity.forExtractedFile(otherArchive)));
+            assertEquals(com.foobnix.pdf.info.ReadingKey.of(identity),
+                    com.foobnix.pdf.info.ReadingKey.of(ArchiveMemberIdentity.forExtractedFile(otherArchive)));
             for (File file : new File[]{first, otherEntry, otherArchive}) {
                 BookCacheLeases.cancelReservation(file);
                 assertTrue(BookCacheLeases.evictTree(file.getParentFile()));
@@ -115,7 +115,7 @@ public class ZipDialogTest {
             assertSame(progress, org.ebookdroid.common.settings.SettingsManager
                     .getBookSettings(new android.content.Intent(), reopened.getPath()));
             BookCacheLeases.cancelReservation(reopened);
-            org.ebookdroid.common.settings.books.SharedBooks.cache.remove(ExtUtils.getFileName(identity));
+            org.ebookdroid.common.settings.books.SharedBooks.cache.remove(com.foobnix.pdf.info.ReadingKey.of(identity));
         } finally {
             CacheZipUtils.CACHE_RECENT = prior;
             BookCacheLeases.evictTree(root);
