@@ -45,13 +45,10 @@ public final class SafFileLink implements AutoCloseable {
         File temporaryLink = null;
         AutoCloseable temporaryLease = null;
         try {
-            synchronized (BookCacheLeases.class) {
-                temporaryDirectory = File.createTempFile("saf-book-", "", context.getCacheDir());
-                if (!temporaryDirectory.delete() || !temporaryDirectory.mkdir()) {
-                    throw new IOException("Cannot create SAF link directory");
-                }
-                temporaryLease = BookCacheLeases.acquire(temporaryDirectory);
-            }
+            BookCacheLeases.LeasedFile owned = BookCacheLeases.temporaryDirectoryWithLease(
+                    context.getCacheDir(), "saf-book-");
+            temporaryDirectory = owned.file;
+            temporaryLease = owned;
             temporaryLink = new File(temporaryDirectory, new File(displayName).getName());
             if (seekableRegularFile(descriptor)) {
                 Os.symlink("/proc/self/fd/" + descriptor.getFd(), temporaryLink.getAbsolutePath());
@@ -72,9 +69,8 @@ public final class SafFileLink implements AutoCloseable {
                 }
             }
         } catch (Exception e) {
-            if (temporaryLink != null) temporaryLink.delete();
-            if (temporaryDirectory != null) temporaryDirectory.delete();
             if (temporaryLease != null) temporaryLease.close();
+            if (temporaryDirectory != null) BookCacheLeases.evictTree(temporaryDirectory);
             descriptor.close();
             throw e;
         }
@@ -92,11 +88,9 @@ public final class SafFileLink implements AutoCloseable {
     }
 
     @Override public void close() throws IOException {
-        file.delete();
-        directory.delete();
         try { descriptor.close(); }
         finally {
-            try { lease.close(); }
+            try { lease.close(); BookCacheLeases.evictTree(directory); }
             catch (Exception failure) { throw new IOException("Cannot release SAF staging lease", failure); }
         }
     }

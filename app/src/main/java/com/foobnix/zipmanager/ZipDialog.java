@@ -329,10 +329,7 @@ public class ZipDialog {
             ArchiveMemberIdentity.mark(staging,
                     ArchiveMemberIdentity.create(archiveSource, fileName));
             File result = new File(completed, outFileName);
-            synchronized (BookCacheLeases.class) {
-                BookCacheLeases.publish(staging, completed);
-                BookCacheLeases.reserve(result);
-            }
+            BookCacheLeases.publishAndReserve(staging, completed, result);
             published = true;
             return result;
         } catch (Exception e) {

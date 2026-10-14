@@ -274,6 +274,38 @@ public final class BookCacheLeases {
     }
 
     /** Keeps a returned staging file alive until its reader opens it. */
+    public static synchronized LeasedFile temporaryDirectoryWithLease(File parent, String prefix) throws IOException {
+        File directory = new File(parent, prefix + UUID.randomUUID());
+        if (!directory.mkdir()) throw new IOException("Cannot create cache directory: " + directory);
+        return new LeasedFile(directory, acquire(directory));
+    }
+
+    public static synchronized boolean reserveIfComplete(File file, long expectedSize) {
+        if (!file.isFile() || (expectedSize >= 0 && file.length() != expectedSize)) return false;
+        reserve(file);
+        registerImmutableRevisionNamedSource(file);
+        return true;
+    }
+
+    /** Preserve any active pathname, including when the provider's revision has no timestamp. */
+    public static synchronized File publishReservedCopy(File temporary, File destination) throws IOException {
+        if (isProtected(destination)) {
+            String name = destination.getName();
+            int dot = name.lastIndexOf('.');
+            destination = new File(destination.getParentFile(), (dot < 0 ? name : name.substring(0, dot))
+                    + "-" + UUID.randomUUID() + (dot < 0 ? "" : name.substring(dot)));
+        }
+        publish(temporary, destination);
+        reserve(destination);
+        registerImmutableRevisionNamedSource(destination);
+        return destination;
+    }
+
+    public static synchronized void publishAndReserve(File temporary, File destination, File readerPath) throws IOException {
+        publish(temporary, destination);
+        reserve(readerPath);
+    }
+
     public static synchronized void reserve(File file) { add(reservations, file); }
     public static synchronized void cancelReservation(File file) { remove(reservations, file); }
     public static synchronized boolean hasReservation(File file) { return reservations.containsKey(key(file)); }

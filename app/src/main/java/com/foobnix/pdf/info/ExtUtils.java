@@ -438,49 +438,30 @@ public class ExtUtils {
         }
         removeLegacyBookCacheLeases(cacheDir);
         File cachedFile = new File(cacheDir, "source-" + key + "-" + size + "-" + modified + suffix);
-        synchronized (BookCacheLeases.class) {
-            if (cachedFile.isFile() && (size < 0 || cachedFile.length() == size)) {
-                BookCacheLeases.reserve(cachedFile);
-                BookCacheLeases.registerImmutableRevisionNamedSource(cachedFile);
-                pruneSafOpenCache(cacheDir, cachedFile);
-                LOG.d("openFile SAF cache hit", cachedFile.getPath());
-                return cachedFile;
-            }
+        if (BookCacheLeases.reserveIfComplete(cachedFile, size)) {
+            pruneSafOpenCache(cacheDir, cachedFile);
+            LOG.d("openFile SAF cache hit", cachedFile.getPath());
+            return cachedFile;
         }
 
-        File tempFile = BookCacheLeases.temporary(cacheDir, "source-" + key + "-");
-        try (InputStream input = resolver.openInputStream(uri);
-             FileOutputStream output = new FileOutputStream(tempFile)) {
-            if (input == null) throw new IOException("Cannot open SAF file");
-            byte[] buffer = new byte[128 * 1024];
-            int count;
-            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
-            output.getFD().sync();
-        } catch (Exception e) {
-            tempFile.delete();
-            throw e;
-        }
-        if (size >= 0 && tempFile.length() != size) {
-            tempFile.delete();
-            throw new IOException("Incomplete SAF file: expected " + size + ", copied " + tempFile.length());
-        }
-        synchronized (BookCacheLeases.class) {
-            try {
-                // A concurrent open may already use this pathname. Give this download
-                // its own name so pathname readers and sibling lookups stay stable.
-                if (BookCacheLeases.isProtected(cachedFile)) {
-                    cachedFile = new File(cacheDir, "source-" + key + "-" + size + "-"
-                            + modified + "-" + UUID.randomUUID() + suffix);
-                }
-                BookCacheLeases.publish(tempFile, cachedFile);
-            } catch (IOException failure) {
-                tempFile.delete();
-                throw failure;
+        File tempFile = null;
+        try (BookCacheLeases.LeasedFile writing = BookCacheLeases.temporaryWithLease(cacheDir, "source-" + key + "-")) {
+            tempFile = writing.file;
+            try (InputStream input = context.getContentResolver().openInputStream(uri);
+                 FileOutputStream output = new FileOutputStream(tempFile)) {
+                if (input == null) throw new IOException("Cannot open SAF file: " + uri);
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+                output.getFD().sync();
             }
-            BookCacheLeases.reserve(cachedFile);
-            BookCacheLeases.registerImmutableRevisionNamedSource(cachedFile);
-            pruneSafOpenCache(cacheDir, cachedFile);
+            if (size >= 0 && tempFile.length() != size)
+                throw new IOException("Incomplete SAF file: expected " + size + ", copied " + tempFile.length());
+            cachedFile = BookCacheLeases.publishReservedCopy(tempFile, cachedFile);
+        } finally {
+            if (tempFile != null) BookCacheLeases.evictTree(tempFile);
         }
+        pruneSafOpenCache(cacheDir, cachedFile);
         LOG.d("openFile SAF cached", cachedFile.getPath(), cachedFile.length());
         return cachedFile;
     }
