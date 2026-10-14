@@ -62,6 +62,7 @@ import com.foobnix.ext.CbzCbrExtractor;
 import com.foobnix.ext.Fb2Extractor;
 import com.foobnix.librerax.LibreraX;
 import com.foobnix.model.AppBookmark;
+import com.foobnix.model.AppData;
 import com.foobnix.model.AppProfile;
 import com.foobnix.model.AppSP;
 import com.foobnix.model.AppState;
@@ -1402,6 +1403,62 @@ public class ExtUtils {
         }
     }
 
+    public static void openWith(final Context context, final FileMeta book) {
+        if (!isExteralSD(book.getPath())) {
+            openWith(context, new File(book.getPath()));
+            return;
+        }
+        new Thread(() -> {
+            try {
+                Uri access = SafDocumentIdentity.readableAccess(context, Uri.parse(book.getPath()));
+                new Handler(Looper.getMainLooper()).post(() -> openWithSafUri(context, access, ReadingKey.of(book.getPath())));
+            } catch (Exception failure) { LOG.e(failure); }
+        }, "Open provider book with").start();
+    }
+
+    /** Provider I/O runs on the action worker; the shared file keeps its provider name. */
+    public static Intent providerSendIntent(Context context, FileMeta book) throws IOException {
+        Uri access = SafDocumentIdentity.readableAccess(context, Uri.parse(book.getPath()));
+        String name = ReadingKey.of(book.getPath());
+        String mime = null;
+        try { mime = context.getContentResolver().getType(access); }
+        catch (RuntimeException failure) { LOG.e(failure); }
+        if (TxtUtils.isEmpty(mime)) mime = getMimeType(name);
+        Intent intent = new Intent(Intent.ACTION_SEND).setType(mime)
+                .putExtra(Intent.EXTRA_STREAM, access).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        intent.setClipData(android.content.ClipData.newRawUri(name, access));
+        return intent;
+    }
+
+    public static void sendFileTo(final Activity activity, final FileMeta book) {
+        if (!isExteralSD(book.getPath())) {
+            sendFileTo(activity, new File(book.getPath()));
+            return;
+        }
+        new Thread(() -> {
+            try {
+                Intent intent = providerSendIntent(activity, book);
+                activity.runOnUiThread(() -> activity.startActivity(
+                        Intent.createChooser(intent, activity.getString(R.string.send_file_to))));
+            } catch (Exception failure) { LOG.e(failure); }
+        }, "Send provider book").start();
+    }
+
+    public static boolean deleteProviderBook(Context context, FileMeta book) {
+        for (Uri access : SafDocumentIdentity.accessCandidates(context, Uri.parse(book.getPath()))) {
+            try {
+                if (!DocumentsContract.deleteDocument(context.getContentResolver(), access)) continue;
+                AppDB.get().deleteBy(SafDocumentIdentity.canonical(Uri.parse(book.getPath())).toString());
+                AppData.get().removeRecent(book);
+                AppData.get().removeFavorite(book);
+                com.foobnix.model.Tags2.setTagsByPath(book.getPath(), java.util.Collections.emptyList());
+                TempHolder.listHash++;
+                return true;
+            } catch (Exception failure) { LOG.e(failure); }
+        }
+        return false;
+    }
+
     /** Send the provider-owned document directly; an external reader may reopen it later. */
     public static void openWithSafUri(final Context context, final Uri uri, String displayName) {
         try {
@@ -1411,6 +1468,7 @@ public class ExtUtils {
             if (TxtUtils.isEmpty(mime)) mime = getMimeType(displayName);
             Intent intent = new Intent(Intent.ACTION_VIEW);
             intent.setDataAndType(uri, mime);
+            intent.setClipData(android.content.ClipData.newRawUri(displayName, uri));
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             if (!(context instanceof Activity)) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             context.startActivity(intent);

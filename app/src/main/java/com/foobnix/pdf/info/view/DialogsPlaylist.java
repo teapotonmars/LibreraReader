@@ -84,9 +84,13 @@ public class DialogsPlaylist {
     static AlertDialog create;
 
     public static void showPlaylistsDialog(final Context a, final Runnable refresh, final File file) {
+        showBookPlaylistsDialog(a, refresh, file == null ? null : new FileMeta(file.getPath()));
+    }
+
+    public static void showBookPlaylistsDialog(final Context a, final Runnable refresh, final FileMeta book) {
         final AlertDialog.Builder builder = new AlertDialog.Builder(a);
 
-        if (file != null) {
+        if (book != null) {
             builder.setTitle(R.string.add_to_playlist);
         }
 
@@ -106,15 +110,15 @@ public class DialogsPlaylist {
                     @Override public void populateView(View layout, final int position, final String tagName) {
                         TextView text = (TextView) layout.findViewById(R.id.text1);
                         text.setText(Playlists.formatPlaylistName(a, tagName));
-                        if (file == null) {
+                        if (book == null) {
                             TxtUtils.underlineTextView(text);
                         }
 
                         layout.setOnClickListener(new OnClickListener() {
 
                             @Override public void onClick(View v) {
-                                if (file != null) {
-                                    Playlists.addMetaToPlaylist(tagName, file);
+                                if (book != null) {
+                                    Playlists.addPathToPlaylist(tagName, book.getPath());
                                     create.dismiss();
                                 } else {
                                     showPlayList(a, tagName, null);
@@ -123,7 +127,7 @@ public class DialogsPlaylist {
                         });
 
                         ImageView img = layout.findViewById(R.id.delete1);
-                        if (file != null) {
+                        if (book != null) {
                             img.setVisibility(View.GONE);
                         }
                         // The cross in the colour links are drawn in.
@@ -485,9 +489,10 @@ public class DialogsPlaylist {
                     }
 
                     @Override public void onItemLongClick(String result) {
-                        ShareDialog.show(dc.getActivity(), new File(result), new Runnable() {
+                        ShareDialog.show(dc.getActivity(), AppDB.get().getOrCreate(result), new Runnable() {
                             @Override public void run() {
-
+                                FileMeta book = AppDB.get().getOrCreate(result);
+                                if (ExtUtils.isExteralSD(book.getPath())) ExtUtils.deleteProviderBook(a, book);
                             }
                         }, 0, dc, new Runnable() {
                             @Override public void run() {
@@ -505,7 +510,8 @@ public class DialogsPlaylist {
                             dc.onCloseActivityFinal(new Runnable() {
 
                                 @Override public void run() {
-                                    ExtUtils.showDocumentWithoutDialog(a, new File(s), displayPath);
+                                    if (ExtUtils.isExteralSD(s)) ExtUtils.openFile(a, AppDB.get().getOrCreate(s));
+                                    else ExtUtils.showDocumentWithoutDialog(a, new File(s), displayPath);
                                 }
                             });
                         }

@@ -71,7 +71,8 @@ public class Tags2 {
             }
             long count = array.toList()
                               .stream()
-                              .filter(o -> new File(o.toString()).exists())
+                              .filter(o -> com.foobnix.pdf.info.ExtUtils.isExteralSD(o.toString())
+                                      || new File(o.toString()).exists())
                               .count();
             res.add(new Pair<>(key, (int) count));
         }
@@ -80,7 +81,11 @@ public class Tags2 {
     }
 
     public static List<String> getAllTagsByFile(File file) {
-        if (file == null) {
+        return getAllTagsByPath(file == null ? null : file.getPath());
+    }
+
+    public static List<String> getAllTagsByPath(String path) {
+        if (path == null) {
             return Collections.emptyList();
         }
         LinkedJSONObject obj = IO.readJsonObject(AppProfile.syncTags2);
@@ -90,7 +95,7 @@ public class Tags2 {
             if (array == null) {
                 continue;
             }
-            int index = getIndex(array, file.getPath());
+            int index = getIndex(array, path);
             if (index >= 0) {
                 res.add(key);
             }
@@ -115,15 +120,19 @@ public class Tags2 {
     }
 
     public static void setTags(File file, List<String> tags) {
+        setTagsByPath(file.getPath(), tags);
+    }
+
+    public static void setTagsByPath(String path, List<String> tags) {
         LinkedJSONObject obj = IO.readJsonObject(AppProfile.syncTags2);
         for (String allTag : obj.keySet()) {
             boolean isCurrentTag = tags.contains(allTag);
             JSONArray array = obj.getJSONArray(allTag);
-            int index = getIndex(array, file.getPath());
+            int index = getIndex(array, path);
 
             if (isCurrentTag) {
                 if (index < 0) {
-                    array.put(file.getPath());
+                    array.put(path);
                 }
             } else {
                 array.remove(index);
@@ -131,7 +140,7 @@ public class Tags2 {
 
         }
         IO.writeObjSync(AppProfile.syncTags2, obj);
-        LOG.d("Tags2", "addTags", file, tags);
+        LOG.d("Tags2", "addTags", path, tags);
     }
 
     public static int getIndex(JSONArray array, String value) {
@@ -213,22 +222,27 @@ public class Tags2 {
              .updateAll(allWithTag);
 
         LinkedJSONObject obj = IO.readJsonObject(AppProfile.syncTags2);
-        Map<File, Set<String>> mapTags = new LinkedHashMap<>();
+        Map<String, Set<String>> mapTags = new LinkedHashMap<>();
         for (String tag : obj.keySet()) {
             for (Object fileO : obj.getJSONArray(tag)
                                    .toList()) {
-                mapTags.computeIfAbsent(new File(fileO.toString()), k -> new HashSet<>())
+                String path = fileO.toString();
+                if (!com.foobnix.pdf.info.ExtUtils.isExteralSD(path)) path = new File(path).getPath();
+                mapTags.computeIfAbsent(path, k -> new HashSet<>())
                        .add(tag);
             }
         }
-        for (File file : mapTags.keySet()) {
-            if (!file.exists()) {
+        for (String path : mapTags.keySet()) {
+            if (com.foobnix.pdf.info.ExtUtils.isExteralSD(path)
+                    ? AppDB.get().load(path) == null : !new File(path).exists()) {
                 continue;
             }
             FileMeta load = AppDB.get()
-                                 .getOrCreate(file.getPath());
-            load.setIsSearchBook(true);
-            String tags = mapTags.get(file)
+                                 .getOrCreate(path);
+            if (!com.foobnix.pdf.info.ExtUtils.isExteralSD(path)
+                    || !AppData.get().getAllExcluded().contains(new SimpleMeta(path)))
+                load.setIsSearchBook(true);
+            String tags = mapTags.get(path)
                                  .stream()
                                  .collect(Collectors.joining(","));
             String tagLine = tags + ",";

@@ -52,7 +52,7 @@ public class DefaultListeners {
 
         searchAdapter.setOnItemClickListener(result -> {
             onClick.run();
-            dc.onCloseActivityFinal(() -> ExtUtils.showDocumentWithoutDialog(a, new File(result.getPath()), null));
+            dc.onCloseActivityFinal(() -> ExtUtils.openFile(a, result));
             return false;
         });
         searchAdapter.setOnItemLongClickListener(onLongClickChooser(a, searchAdapter));
@@ -169,13 +169,12 @@ public class DefaultListeners {
                                .addRecent(new SimpleMeta(result.getPath()));
                         EventBus.getDefault()
                                 .post(new NotifyAllFragments());
-                        ExtUtils.openWith(a, new File(result.getPath()));
+                        ExtUtils.openWith(a, result);
                         return false;
                     }
 
-                    if (AppSP.get().readingMode == AppState.READING_MODE_TAG_MANAGER && !ExtUtils.isExteralSD(
-                            result.getPath())) {
-                        Dialogs.showTagsDialog(a, new File(result.getPath()), true, new Runnable() {
+                    if (AppSP.get().readingMode == AppState.READING_MODE_TAG_MANAGER && !Clouds.isCloud(result.getPath())) {
+                        Dialogs.showBookTagsDialog(a, result, true, new Runnable() {
 
                             @Override public void run() {
                                 Tags2.updateTagsDB();
@@ -217,14 +216,13 @@ public class DefaultListeners {
                 return true;
             }
 
-            File file = new File(result.getPath());
-
             if (ExtUtils.isExteralSD(result.getPath())) {
                 Runnable onDeleteAction = () -> deleteFile(a, searchAdapter, result);
                 FileInformationDialog.showFileInfoDialog(a, result, onDeleteAction);
                 return true;
             }
 
+            File file = new File(result.getPath());
             if (Clouds.isCloud(file.getPath()) && Clouds.isCacheFileExist(file.getPath())) {
                 file = Clouds.getCacheFile(file.getPath());
             }
@@ -262,14 +260,7 @@ public class DefaultListeners {
     private static void deleteFile(final Activity a, final FileMetaAdapter searchAdapter, final FileMeta result) {
         boolean delete = false;
         if (ExtUtils.isExteralSD(result.getPath())) {
-            try {
-                DocumentFile doc = DocumentFile.fromSingleUri(a,
-                        com.foobnix.pdf.info.SafDocumentIdentity.readableAccess(a,
-                                Uri.parse(result.getPath())));
-                delete = doc != null && doc.delete();
-            } catch (java.io.IOException failure) {
-                LOG.e(failure);
-            }
+            delete = ExtUtils.deleteProviderBook(a, result);
         } else if (Clouds.isCloud(result.getPath())) {
             removeCloudFile(a, searchAdapter, result);
         } else {
@@ -421,31 +412,16 @@ public class DefaultListeners {
 
             ADS.hideAdsTemp(a);
 
-            File file = new File(result.getPath());
-
-            if (Clouds.isCloud(file.getPath()) && Clouds.isCacheFileExist(file.getPath())) {
-                file = Clouds.getCacheFile(file.getPath());
-            }
-
-            Runnable onDeleteAction = new Runnable() {
-
-                @Override public void run() {
-                    deleteFile(a, searchAdapter, result);
-                }
-
-            };
-
+            Runnable onDeleteAction = () -> deleteFile(a, searchAdapter, result);
             if (ExtUtils.isExteralSD(result.getPath())) {
-                ShareDialog.show(a, file, result, onDeleteAction, -1, null, null);
+                ShareDialog.show(a, result, onDeleteAction, -1, null, null);
             } else {
-
+                File file = new File(result.getPath());
+                if (Clouds.isCloud(file.getPath()) && Clouds.isCacheFileExist(file.getPath()))
+                    file = Clouds.getCacheFile(file.getPath());
                 if (ExtUtils.doifFileExists(a, result.getPath())) {
-
-                    if (ExtUtils.isNotSupportedFile(file)) {
-                        ShareDialog.showArchive(a, file, onDeleteAction);
-                    } else {
-                        ShareDialog.show(a, file, onDeleteAction, -1, null, null);
-                    }
+                    if (ExtUtils.isNotSupportedFile(file)) ShareDialog.showArchive(a, file, onDeleteAction);
+                    else ShareDialog.show(a, file, result, onDeleteAction, -1, null, null);
                 }
             }
 

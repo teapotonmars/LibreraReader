@@ -92,7 +92,7 @@ public class BookmarksFragment2 extends UIFragment<AppBookmark> {
 
             @Override
             public boolean onResultRecive(AppBookmark result) {
-                FileInformationDialog.showFileInfoDialog(getActivity(), new File(result.getPath()), null);
+                FileInformationDialog.showFileInfoDialog(getActivity(), com.foobnix.ui2.AppDB.get().getOrCreate(result.getPath()), null);
                 return true;
             }
         });

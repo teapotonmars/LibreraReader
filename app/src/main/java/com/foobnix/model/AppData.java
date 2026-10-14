@@ -340,7 +340,7 @@ public class AppData {
         List<FileMeta> res = new ArrayList<>();
         for (SimpleMeta s : favorites) {
 
-            if (new File(s.getPath()).isDirectory() || Clouds.isCloudDir(s.getPath())) {
+            if ((!ExtUtils.isExteralSD(s.getPath()) && new File(s.getPath()).isDirectory()) || Clouds.isCloudDir(s.getPath())) {
                 FileMeta meta = AppDB.get().getOrCreate(s.getPath());
                 meta.setIsStar(true);
                 meta.setPathTxt(ExtUtils.getFileName(s.getPath()));

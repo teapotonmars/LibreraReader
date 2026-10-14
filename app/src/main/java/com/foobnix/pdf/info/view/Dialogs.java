@@ -1156,6 +1156,11 @@ public class Dialogs {
 
     public static void showTagsDialog(final Activity a, final File file,
                                       final boolean isReadBookOption, final Runnable refresh) {
+        showBookTagsDialog(a, file == null ? null : new FileMeta(file.getPath()), isReadBookOption, refresh);
+    }
+
+    public static void showBookTagsDialog(final Activity a, final FileMeta book,
+                                      final boolean isReadBookOption, final Runnable refresh) {
         final AlertDialog.Builder builder = new AlertDialog.Builder(a);
 
         View inflate = LayoutInflater.from(a).inflate(R.layout.dialog_tags, null, false);
@@ -1167,7 +1172,7 @@ public class Dialogs {
         TintUtil.asLinkButton(add);
 
         final List<String> allTags = Tags2.getAllTags();
-        final List<String> fileTags = Tags2.getAllTagsByFile(file);
+        final List<String> fileTags = Tags2.getAllTagsByPath(book == null ? null : book.getPath());
 
         final Set<Integer> checked = new HashSet<>();
 
@@ -1176,7 +1181,7 @@ public class Dialogs {
             public void populateView(View layout, final int position, final String tagName) {
                 CheckBox text = (CheckBox) layout.findViewById(R.id.tagName);
                 text.setText(tagName);
-                if (file == null) {
+                if (book == null) {
                     text.setEnabled(false);
                 }
 
@@ -1247,7 +1252,7 @@ public class Dialogs {
             }
         });
 
-        if (file != null) {
+        if (book != null) {
 
             builder.setPositiveButton(R.string.apply, new AlertDialog.OnClickListener() {
                 @Override
@@ -1257,7 +1262,7 @@ public class Dialogs {
                         tags.add(allTags.get(i));
 
                     }
-                    Tags2.setTags(file,tags);
+                    Tags2.setTagsByPath(book.getPath(),tags);
 
                     if (refresh != null) {
                         refresh.run();
@@ -1277,9 +1282,9 @@ public class Dialogs {
                     List<String> tags = new ArrayList<>();
                     for (int i : checked) {
                         tags.add(allTags.get(i));
-                        Tags2.setTags(file,tags);
+                        Tags2.setTagsByPath(book.getPath(),tags);
                     }
-                    ExtUtils.openFile(a, new FileMeta(file.getPath()));
+                    ExtUtils.openFile(a, book);
                 }
 
             });

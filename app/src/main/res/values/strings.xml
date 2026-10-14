@@ -695,4 +695,5 @@
    <string name="text_and_background_color">Text and Background Color</string>
    <string name="librerax_not_installed">LibreraX is not installed. Download and install it, then open the book again.</string>
    <string name="remove_library_folder">Remove this folder from the library? The files in it will not be deleted.</string>
+    <string name="delete_from_provider">Delete “%1$s” from %2$s? It will be deleted there, not only on this device.</string>
 </resources>

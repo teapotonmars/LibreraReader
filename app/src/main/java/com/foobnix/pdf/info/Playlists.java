@@ -68,11 +68,15 @@ public class Playlists {
     }
 
     public static void addMetaToPlaylist(String name, File file) {
+        addPathToPlaylist(name, file.getPath());
+    }
+
+    public static void addPathToPlaylist(String name, String path) {
         File child = new File(AppProfile.syncPlaylist, name.endsWith(L_PLAYLIST) ? name : name + L_PLAYLIST);
 
         try {
             PrintWriter out = new PrintWriter(new BufferedWriter(new FileWriter(child, true)));
-            out.println(MyPath.toRelative(file.getPath()));
+            out.println(MyPath.toRelative(path));
             out.close();
 
             EventBus.getDefault()

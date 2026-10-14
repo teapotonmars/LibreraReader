@@ -167,11 +167,16 @@ public class FileInformationDialog {
     }
 
     public static void showFileInfoDialog(final Activity a, final File file, final Runnable onDeleteAction) {
-        showFileInfoDialog(a, file, null, onDeleteAction, true);
+        String original = com.foobnix.pdf.info.SafReaderLaunch.original(a.getIntent());
+        if (original != null && ExtUtils.isExteralSD(original)) {
+            FileMeta book = AppDB.get().getOrCreate(original);
+            showFileInfoDialog(a, book, () -> { if (ExtUtils.deleteProviderBook(a, book)) a.finish(); });
+        } else showFileInfoDialog(a, file, null, onDeleteAction, true);
     }
 
     public static void showFileInfoDialog(final Activity a, final FileMeta preloaded, final Runnable onDeleteAction) {
-        showFileInfoDialog(a, new File(preloaded.getPath()), preloaded, onDeleteAction, true);
+        showFileInfoDialog(a, ExtUtils.isExteralSD(preloaded.getPath()) ? null : new File(preloaded.getPath()),
+                preloaded, onDeleteAction, true);
     }
 
     public static void showFileInfoDialog(final Activity a, final File file, final Runnable onDeleteAction,
@@ -187,9 +192,7 @@ public class FileInformationDialog {
                 ? preloadedMeta
                 : AppDB.get().getOrCreate(file.getPath());
 
-        // The "logical path" is the SAF URI (or Cloud path) when this is a SAF/cloud book;
-        // file.getPath() may be a symlink under our cache or a slash-normalized "content:/..." string,
-        // both of which break DB, Glide cache, and SafOpfRegistry lookups.
+        // Library operations use the row's identity, including when reading a staged copy.
         final String logicalPath = preloadedMeta != null && TxtUtils.isNotEmpty(preloadedMeta.getPath())
                 ? preloadedMeta.getPath()
                 : file.getPath();
@@ -221,7 +224,8 @@ public class FileInformationDialog {
 
         final ImageView image = (ImageView) dialog.findViewById(R.id.cloudImage);
         boolean isCloud = Clouds.showHideCloudImage(image, fileMeta.getPath());
-        if (!isCloud) {
+        if (isSaf) image.setVisibility(View.GONE);
+        if (!isCloud && !isSaf) {
             // image.setVisibility(View.VISIBLE);
             image.setImageResource(R.drawable.glyphicons_545_cloud_upload);
             TintUtil.setTintImageWithAlpha(image);
@@ -289,8 +293,8 @@ public class FileInformationDialog {
         ((TextView) dialog.findViewById(R.id.size)).setText(
                 com.foobnix.ui2.adapter.BookSizeText.format(fileMeta));
 
-        File mimeFile = isSaf ? new File(TxtUtils.nullToEmpty(fileMeta.getPathTxt())) : file;
-        ((TextView) dialog.findViewById(R.id.mimeType)).setText("" + ExtUtils.getMimeType(mimeFile));
+        ((TextView) dialog.findViewById(R.id.mimeType)).setText(isSaf
+                ? ExtUtils.getMimeType(TxtUtils.nullToEmpty(fileMeta.getPathTxt())) : ExtUtils.getMimeType(file));
 
         final TextView hypenLang = (TextView) dialog.findViewById(R.id.hypenLang);
         hypenLang.setText(DialogTranslateFromTo.getLanuageByCode(fileMeta.getLang()));
@@ -299,7 +303,7 @@ public class FileInformationDialog {
         }
 
         List<AppBookmark> objects = BookmarksData.get()
-                                                 .getBookmarksByBook(file);
+                                                 .getBookmarksByBook(logicalPath);
         StringBuilder lines = new StringBuilder();
         String fast = a.getString(R.string.fast_bookmark);
         if (TxtUtils.isListNotEmpty(objects)) {
@@ -433,11 +437,12 @@ public class FileInformationDialog {
         tagsRunnable.run();
 
         final ImageView tagIcon = (ImageView) dialog.findViewById(R.id.tagIcon);
+        if (isCloud) tagIcon.setVisibility(View.GONE);
         TintUtil.setTintImageNoAlpha(tagIcon, TintUtil.getColorInDayNighth());
         tagIcon.setOnClickListener(new OnClickListener() {
 
             @Override public void onClick(View v) {
-                Dialogs.showTagsDialog(a, new File(fileMeta.getPath()), false, new Runnable() {
+                Dialogs.showBookTagsDialog(a, fileMeta, false, new Runnable() {
 
                     @Override public void run() {
                         tagsRunnable.run();
@@ -452,7 +457,7 @@ public class FileInformationDialog {
         TextView metaTagsInfo = (TextView) dialog.findViewById(R.id.metaTagsInfo);
         metaTags.setVisibility(View.GONE);
         metaTagsInfo.setVisibility(View.GONE);
-        if (BookType.PDF.is(file.getPath()) || BookType.DJVU.is(file.getPath())) {
+        if (!isSaf && (BookType.PDF.is(file.getPath()) || BookType.DJVU.is(file.getPath()))) {
             metaTags.setVisibility(View.VISIBLE);
             metaTagsInfo.setVisibility(View.VISIBLE);
 
@@ -508,38 +513,24 @@ public class FileInformationDialog {
             }
         });
         convertFile.setText(TxtUtils.underline(a.getString(R.string.convert_to) + " EPUB"));
-        convertFile.setVisibility(ExtUtils.isImageOrEpub(file) ? View.GONE : View.VISIBLE);
+        convertFile.setVisibility(isSaf || ExtUtils.isImageOrEpub(file) ? View.GONE : View.VISIBLE);
         convertFile.setVisibility(View.GONE);
 
         View openWithView = TxtUtils.underlineTextView(dialog.findViewById(R.id.openWith));
-        if (isSaf) {
-            openWithView.setVisibility(View.GONE);
-        } else {
-            openWithView.setOnClickListener(new OnClickListener() {
-                @Override public void onClick(View v) {
-                    if (infoDialog != null) {
-                        infoDialog.dismiss();
-                        infoDialog = null;
-                    }
-                    ExtUtils.openWith(a, file);
-                }
-            });
-        }
+        if (isSaf) openWithView.setVisibility(View.VISIBLE);
+        openWithView.setOnClickListener(v -> {
+            if (infoDialog != null) { infoDialog.dismiss(); infoDialog = null; }
+            if (isSaf) ExtUtils.openWith(a, fileMeta);
+            else ExtUtils.openWith(a, file);
+        });
 
         View sendFileView = TxtUtils.underlineTextView(dialog.findViewById(R.id.sendFile));
-        if (isSaf) {
-            sendFileView.setVisibility(View.GONE);
-        } else {
-            sendFileView.setOnClickListener(new OnClickListener() {
-                @Override public void onClick(View v) {
-                    if (infoDialog != null) {
-                        infoDialog.dismiss();
-                        infoDialog = null;
-                    }
-                    ExtUtils.sendFileTo(a, file);
-                }
-            });
-        }
+        if (isSaf) sendFileView.setVisibility(View.VISIBLE);
+        sendFileView.setOnClickListener(v -> {
+            if (infoDialog != null) { infoDialog.dismiss(); infoDialog = null; }
+            if (isSaf) ExtUtils.sendFileTo(a, fileMeta);
+            else ExtUtils.sendFileTo(a, file);
+        });
 
         TextView delete = TxtUtils.underlineTextView(dialog.findViewById(R.id.delete));
         if (onDeleteAction == null) {
@@ -553,10 +544,8 @@ public class FileInformationDialog {
                     infoDialog = null;
                 }
 
-                String deleteDisplayName = isSaf
-                        ? TxtUtils.nullToEmpty(fileMeta.getPathTxt())
-                        : null;
-                dialogDelete(a, file, deleteDisplayName, onDeleteAction);
+                if (isSaf) dialogDelete(a, fileMeta, onDeleteAction);
+                else dialogDelete(a, file, onDeleteAction);
 
             }
         });
@@ -574,7 +563,8 @@ public class FileInformationDialog {
                 infoDialog.dismiss();
                 infoDialog = null;
             }
-            ExtUtils.showDocumentWithoutDialog2(a, file);
+            if (isSaf) ExtUtils.openFile(a, fileMeta);
+            else ExtUtils.showDocumentWithoutDialog2(a, file);
 
         });
 
@@ -637,7 +627,7 @@ public class FileInformationDialog {
         TextView editAnnotation = (TextView) dialog.findViewById(R.id.editAnnotation);
         Views.gone(editTitle, editAuthor, editAnnotation);
 
-        if (BookType.PDF.is(file.getPath())) {
+        if (!isSaf && BookType.PDF.is(file.getPath())) {
             Views.visible(editTitle, editAuthor, editAnnotation);
 
             TxtUtils.underline(editTitle, editTitle.getText()
@@ -792,6 +782,30 @@ public class FileInformationDialog {
         builder.show();
     }
 
+    public static String providerDeleteMessage(Context context, FileMeta book) {
+        String authority = android.net.Uri.parse(book.getPath()).getAuthority();
+        String providerName = authority;
+        android.content.pm.ProviderInfo provider = context.getPackageManager().resolveContentProvider(authority, 0);
+        if (provider != null) {
+            CharSequence label = provider.loadLabel(context.getPackageManager());
+            if (label != null && label.length() > 0) providerName = label.toString();
+        }
+        return context.getString(R.string.delete_from_provider,
+                com.foobnix.pdf.info.ReadingKey.of(book.getPath()), providerName);
+    }
+
+    public static AlertDialog dialogDelete(final Activity a, final FileMeta book, final Runnable onDeleteAction) {
+        if (!ExtUtils.isExteralSD(book.getPath())) {
+            dialogDelete(a, new File(book.getPath()), onDeleteAction);
+            return null;
+        }
+        return new AlertDialog.Builder(a).setMessage(providerDeleteMessage(a, book))
+                .setPositiveButton(android.R.string.yes, (dialog, which) -> {
+                    if (onDeleteAction != null) onDeleteAction.run();
+                })
+                .setNegativeButton(android.R.string.cancel, (dialog, which) -> dialog.dismiss()).show();
+    }
+
     public static void dialogDelete(final Activity a, final File file, final Runnable onDeleteAction) {
         dialogDelete(a, file, null, onDeleteAction);
     }
@@ -856,6 +870,20 @@ public class FileInformationDialog {
     }
 
     public static void update(FileMeta fileMeta) {
+        if (ExtUtils.isExteralSD(fileMeta.getPath())) {
+            new Thread(() -> {
+                try (com.foobnix.pdf.info.SafFileLink source = new com.foobnix.pdf.info.SafFileLink(
+                        LibreraApp.context, android.net.Uri.parse(fileMeta.getPath()), fileMeta.getPathTxt())) {
+                    var metadata = FileMetaCore.get().getEbookMeta(source.file.getPath(),
+                            com.foobnix.ext.CacheZipUtils.CacheDir.ZipApp, true);
+                    FileMetaCore.get().udpateFullMeta(fileMeta, metadata);
+                    AppDB.get().save(fileMeta);
+                    TempHolder.listHash++;
+                    EventBus.getDefault().post(new UpdateAllFragments());
+                } catch (Exception failure) { LOG.e(failure); }
+            }, "Refresh provider metadata").start();
+            return;
+        }
         IMG.clearMemoryCache();
         IMG.clearDiscCache();
 

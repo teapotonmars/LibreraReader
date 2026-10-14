@@ -238,42 +238,53 @@ public class ShareDialog {
         create.show();
     }
 
-    public static void show(final Activity a, final File file, final Runnable onDeleteAction, final int page,
+    public static AlertDialog show(final Activity a, final File file, final Runnable onDeleteAction, final int page,
                             final DocumentController dc, final Runnable hideShow) {
-        FileMeta resolved = null;
-        String safUri = a != null && a.getIntent() != null
-                ? SafReaderLaunch.original(a.getIntent())
-                : null;
-        if (safUri != null) {
-            resolved = AppDB.get().load(safUri);
+        String original = SafReaderLaunch.original(a.getIntent());
+        FileMeta resolved = original == null ? null : AppDB.get().getOrCreate(original);
+        if (resolved != null && ExtUtils.isExteralSD(resolved.getPath())) {
+            return show(a, file, resolved, () -> {
+                if (ExtUtils.deleteProviderBook(a, resolved)) a.finish();
+            }, page, dc, hideShow);
         }
-        show(a, file, resolved, onDeleteAction, page, dc, hideShow);
+        return show(a, file, resolved, onDeleteAction, page, dc, hideShow);
     }
 
-    public static void show(final Activity a, final File file, final FileMeta preloadedMeta,
+    public static AlertDialog show(final Activity a, final FileMeta book, final Runnable onDeleteAction,
+                                   final int page, final DocumentController dc, final Runnable hideShow) {
+        File local = ExtUtils.isExteralSD(book.getPath()) ? null : new File(book.getPath());
+        return show(a, local, book, onDeleteAction, page, dc, hideShow);
+    }
+
+    public static AlertDialog show(final Activity a, final File file, final FileMeta preloadedMeta,
                             final Runnable onDeleteAction, final int page,
                             final DocumentController dc, final Runnable hideShow) {
-        final FileMeta capturedMeta = preloadedMeta;
+        final boolean isCloudBook = preloadedMeta != null && Clouds.isCloud(preloadedMeta.getPath());
+        final FileMeta capturedMeta = preloadedMeta != null && !isCloudBook ? preloadedMeta
+                : file == null ? null : AppDB.get().getOrCreate(file.getPath());
+        final String bookPath = capturedMeta == null ? null : capturedMeta.getPath();
+        final boolean isProvider = ExtUtils.isExteralSD(bookPath);
 
-        if (file == null) {
+        if (capturedMeta == null || (!isProvider && file == null)) {
             Toast.makeText(a, R.string.file_not_found, Toast.LENGTH_LONG)
                  .show();
-            return;
+            return null;
         }
 
-        if (!ExtUtils.isExteralSD(file.getPath()) && ExtUtils.isNotValidFile(file)) {
+        if (!isProvider && ExtUtils.isNotValidFile(file)) {
             Toast.makeText(a, R.string.file_not_found, Toast.LENGTH_LONG)
                  .show();
-            return;
+            return null;
         }
-        final boolean isPDF = BookType.PDF.is(file.getPath());
+        final boolean isPDF = file != null && BookType.PDF.is(file.getPath());
         final boolean isLibrary = false;// a instanceof MainTabs2 ? false :
         // true;
         final boolean isMainTabs = a instanceof MainTabs2;
+        final boolean libraryActions = isMainTabs || isProvider;
 
         List<String> items = new ArrayList<String>();
 
-        final boolean isTxt = BookType.TXT.is(file.getPath());
+        final boolean isTxt = !isProvider && BookType.TXT.is(file.getPath());
         if (isTxt) {
             items.add(a.getString(R.string.edit));
         }
@@ -313,23 +324,23 @@ public class ShareDialog {
         items.add(iconText(a, "⎘", R.string.open_with));
         items.add(iconText(a, "➥", R.string.send_file));
 
-        final boolean isExternalOrCloud = ExtUtils.isExteralSD(file.getPath()) || Clouds.isCloud(file.getPath());
+        final boolean isCloud = isCloudBook || Clouds.isCloud(bookPath);
         boolean canDelete1 =
-                ExtUtils.isExteralSD(file.getPath()) || Clouds.isCloud(file.getPath()) ? true : file.canWrite();
-        final boolean canCopy = !ExtUtils.isExteralSD(file.getPath()) && !Clouds.isCloud(file.getPath());
+                isProvider || Clouds.isCloud(file.getPath()) ? true : file.canWrite();
+        final boolean canCopy = !isProvider && !Clouds.isCloud(file.getPath());
         final boolean isShowInfo = true;
 
         final boolean isRemovedFromLibrary = AppData.get()
                                                     .getAllExcluded()
-                                                    .contains(new SimpleMeta(file.getPath()));
+                                                    .contains(new SimpleMeta(bookPath));
 
-        if (file.getPath()
+        if (!isProvider && bookPath
                 .contains(AppProfile.PROFILE_PREFIX)) {
             canDelete1 = false;
         }
         final boolean canDelete = canDelete1;
 
-        if (isMainTabs) {
+        if (libraryActions) {
             if (canDelete) {
                 //items.add(a.getString(R.string.delete));
                 items.add(iconText(a, "⊗", R.string.delete));
@@ -345,26 +356,26 @@ public class ShareDialog {
             }
         }
 
-        if (!isExternalOrCloud) {
+        if (!isCloud) {
             items.add(iconText(a, "#", R.string.add_tags));
         }
 
-        if (AppsConfig.isCloudsEnable) {
+        if (!isProvider && AppsConfig.isCloudsEnable) {
             items.add(a.getString(R.string.upload_to_cloud));
         }
-        final boolean isPlaylist = file.getName()
+        final boolean isPlaylist = bookPath
                                        .endsWith(Playlists.L_PLAYLIST);
         if (!isPlaylist) {
             items.add(iconText(a, "\uD834\uDD1E", R.string.add_to_playlist));
         }
 
-        final boolean isSyncronized = AppsConfig.IS_FDROID || Clouds.isLibreraSyncFile(file);
+        final boolean isSyncronized = isProvider || AppsConfig.IS_FDROID || Clouds.isLibreraSyncFile(file);
         if (!isSyncronized) {
             //items.add(a.getString(R.string.sync_book));
             items.add(iconText(a, "↻", R.string.sync_book));
         }
 
-        if (isMainTabs) {
+        if (libraryActions) {
             //items.add(a.getString(R.string.delete_reading_progress));
             items.add(iconText(a, "↶", R.string.delete_reading_progress));
 
@@ -373,6 +384,9 @@ public class ShareDialog {
         if (isShowInfo) {
             items.add(iconText(a, "ⓘ", R.string.file_info));
         }
+
+        if (isProvider) items.add(iconText(a, "♥", Boolean.TRUE.equals(capturedMeta.getIsStar())
+                ? R.string.remove_from_favorites : R.string.add_to_favorites));
 
         final AlertDialog.Builder builder = new AlertDialog.Builder(a);
         builder.setItems(items.toArray(new String[items.size()]), new DialogInterface.OnClickListener() {
@@ -467,22 +481,24 @@ public class ShareDialog {
                     }
                     DialogSpeedRead.show(a, dc);
                 } else if (which == i++) {
-                    ExtUtils.openWith(a, file);
+                    if (isProvider) ExtUtils.openWith(a, capturedMeta);
+                    else ExtUtils.openWith(a, file);
                 } else if (which == i++) {
-                    ExtUtils.sendFileTo(a, file);
-                } else if (isMainTabs && canDelete && which == i++) {
-                    FileInformationDialog.dialogDelete(a, file, onDeleteAction);
-                } else if (isMainTabs && canCopy && which == i++) {
+                    if (isProvider) ExtUtils.sendFileTo(a, capturedMeta);
+                    else ExtUtils.sendFileTo(a, file);
+                } else if (libraryActions && canDelete && which == i++) {
+                    FileInformationDialog.dialogDelete(a, capturedMeta, onDeleteAction);
+                } else if (libraryActions && canCopy && which == i++) {
                     TempHolder.get().copyFromPath = file.getPath();
                     Toast.makeText(a, R.string.copy, Toast.LENGTH_SHORT)
                          .show();
                     EventBus.getDefault()
                             .post(new UpdateAllFragments());
-                } else if (isMainTabs && which == i++) {
+                } else if (libraryActions && which == i++) {
                     if (isRemovedFromLibrary) {
 
                         FileMeta load = AppDB.get()
-                                             .load(file.getPath());
+                                             .load(bookPath);
                         if (load != null) {
                             load.setIsSearchBook(true);
                             AppDB.get()
@@ -493,7 +509,7 @@ public class ShareDialog {
 
                     } else {
                         FileMeta load = AppDB.get()
-                                             .load(file.getPath());
+                                             .load(bookPath);
                         if (load != null) {
                             load.setIsSearchBook(false);
                             load.setIsStar(false);
@@ -513,17 +529,17 @@ public class ShareDialog {
 
                     EventBus.getDefault()
                             .post(new UpdateAllFragments());
-                } else if (!isExternalOrCloud && which == i++) {
-                    Dialogs.showTagsDialog(a, file, false, new Runnable() {
+                } else if (!isCloud && which == i++) {
+                    Dialogs.showBookTagsDialog(a, capturedMeta, false, new Runnable() {
                         @Override public void run() {
                             Tags2.updateTagsDB();
 
                         }
                     });
-                } else if (AppsConfig.isCloudsEnable && which == i++) {
+                } else if (!isProvider && AppsConfig.isCloudsEnable && which == i++) {
                     showAddToCloudDialog(a, file);
                 } else if (!isPlaylist && which == i++) {
-                    DialogsPlaylist.showPlaylistsDialog(a, null, file);
+                    DialogsPlaylist.showBookPlaylistsDialog(a, null, capturedMeta);
                 } else if (!isSyncronized && which == i++) {
                     final File to = new File(AppProfile.SYNC_FOLDER_BOOKS, file.getName());
                     boolean result = IO.copyFile(file, to);
@@ -545,7 +561,7 @@ public class ShareDialog {
                                    .removeRecent(new FileMeta(file.getPath()));
 
                             final FileMeta load = AppDB.get()
-                                                       .load(file.getPath());
+                                                       .load(bookPath);
                             if (load != null && load.getIsRecentTime() != null) {
                                 AppData.get()
                                        .addRecent(new SimpleMeta(to.getPath(), load.getIsRecentTime()));
@@ -570,13 +586,15 @@ public class ShareDialog {
                     EventBus.getDefault()
                             .post(new UpdateAllFragments());
 
-                } else if (isMainTabs && which == i++) {
-                    SharedBooks.deleteProgress(file.getPath());
+                } else if (libraryActions && which == i++) {
+                    SharedBooks.deleteProgress(bookPath);
                     EventBus.getDefault()
                             .post(new UpdateAllFragments());
 
                 } else if (isShowInfo && which == i++) {
                     FileInformationDialog.showFileInfoDialog(a, file, capturedMeta, onDeleteAction, true);
+                } else if (isProvider && which == i++) {
+                    com.foobnix.ui2.adapter.DefaultListeners.getOnStarClick(a).onResultRecive(capturedMeta, null);
                 }
 
             }
@@ -594,6 +612,7 @@ public class ShareDialog {
 
         });
         create.show();
+        return create;
 //        MyPopupMenu menu = new MyPopupMenu(a, null);
 //
 //        menu.getMenu(R.drawable.glyphicons_basic_578_share, R.string.share, () -> ExtUtils.openPDFInTextReflow(a, file, page + 1, dc));
