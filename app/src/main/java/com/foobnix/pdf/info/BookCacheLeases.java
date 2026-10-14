@@ -7,6 +7,9 @@ import java.util.Map;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Collection;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import android.system.ErrnoException;
@@ -14,6 +17,22 @@ import android.system.Os;
 
 /** Coordinates publication, reader handoff and eviction of book cache files. */
 public final class BookCacheLeases {
+    /** Package seam for JVM tests; Android always uses lstat and atomic rename. */
+    interface FileSystem {
+        boolean isDirectory(File file) throws IOException;
+        void rename(File source, File destination) throws IOException;
+    }
+    static FileSystem fileSystem = new FileSystem() {
+        @Override public boolean isDirectory(File file) throws IOException {
+            try { return android.system.OsConstants.S_ISDIR(Os.lstat(file.getAbsolutePath()).st_mode); }
+            catch (ErrnoException failure) { throw new IOException(failure); }
+        }
+        @Override public void rename(File source, File destination) throws IOException {
+            try { Os.rename(source.getAbsolutePath(), destination.getAbsolutePath()); }
+            catch (ErrnoException failure) { throw new IOException(failure); }
+        }
+    };
+
     private static final Map<String, Integer> leases = new HashMap<>();
     static final ExecutorService CLEANUP = Executors.newSingleThreadExecutor(work ->
             new Thread(() -> {
@@ -45,6 +64,66 @@ public final class BookCacheLeases {
             if (abandoned != null) for (File file : abandoned) retireTree(file);
         }
         return File.createTempFile(prefix, ".part", directory);
+    }
+
+    /** A temporary path and its ownership are created in one operation. */
+    public static final class LeasedFile implements AutoCloseable {
+        public final File file;
+        private final AutoCloseable lease;
+        private LeasedFile(File file, AutoCloseable lease) {
+            this.file = file;
+            this.lease = lease;
+        }
+        @Override public void close() throws Exception { lease.close(); }
+    }
+
+    public static synchronized LeasedFile temporaryWithLease(File directory, String prefix) throws IOException {
+        File file = temporary(directory, prefix);
+        return new LeasedFile(file, acquire(file));
+    }
+
+    public static synchronized AutoCloseable acquireIfFile(File file) {
+        return file.isFile() ? acquire(file) : null;
+    }
+
+    /** Racing publishers share the complete winner; the losing temporary is retired. */
+    public static synchronized AutoCloseable publishOrReuse(File temporary, File destination) throws IOException {
+        if (!destination.isFile()) publish(temporary, destination);
+        else deleteDetachedTree(temporary);
+        return acquire(destination);
+    }
+
+    /** Hide a whole cache unit or leave every member in place. */
+    public static synchronized List<File> detachAllOrNone(Collection<File> files) {
+        for (File file : files) {
+            if (isProtected(file)) {
+                long now = System.currentTimeMillis();
+                for (File member : files) member.setLastModified(now);
+                return null;
+            }
+        }
+        List<File> originals = new ArrayList<>(), detached = new ArrayList<>();
+        for (File file : files) {
+            // lstat also sees dangling links, which exists() would miss.
+            try { fileSystem.isDirectory(file); }
+            catch (IOException missing) { continue; }
+            File tombstone = new File(file.getParentFile(), ".evicted-" + UUID.randomUUID());
+            try { fileSystem.rename(file, tombstone); }
+            catch (IOException failure) {
+                for (int i = detached.size() - 1; i >= 0; i--) {
+                    try { fileSystem.rename(detached.get(i), originals.get(i)); }
+                    catch (IOException rollback) { throw new IllegalStateException("Cannot restore cache unit", rollback); }
+                }
+                return null;
+            }
+            originals.add(file);
+            detached.add(tombstone);
+        }
+        return detached;
+    }
+
+    public static void deleteDetachedTrees(Collection<File> files) {
+        for (File file : files) deleteDetachedTree(file);
     }
 
     private static String key(File file) { return file.getAbsolutePath(); }
@@ -105,8 +184,8 @@ public final class BookCacheLeases {
     public static synchronized File detachTree(File file) {
         if (isProtected(file) || !file.exists()) return null;
         File tombstone = new File(file.getParentFile(), ".evicted-" + UUID.randomUUID());
-        try { Os.rename(file.getAbsolutePath(), tombstone.getAbsolutePath()); }
-        catch (ErrnoException unavailable) { return null; }
+        try { fileSystem.rename(file, tombstone); }
+        catch (IOException unavailable) { return null; }
         return tombstone;
     }
 
@@ -120,8 +199,8 @@ public final class BookCacheLeases {
 
     private static boolean deleteDetachedTree(File file) {
         boolean directory;
-        try { directory = android.system.OsConstants.S_ISDIR(Os.lstat(file.getAbsolutePath()).st_mode); }
-        catch (ErrnoException unavailable) { return false; }
+        try { directory = fileSystem.isDirectory(file); }
+        catch (IOException unavailable) { return false; }
         if (directory) {
             File[] children = file.listFiles();
             if (children == null) return false;
@@ -133,8 +212,8 @@ public final class BookCacheLeases {
     /** Atomic replacement never removes the previous good file before publication succeeds. */
     public static synchronized void publish(File temporary, File destination) throws IOException {
         try {
-            Os.rename(temporary.getAbsolutePath(), destination.getAbsolutePath());
-        } catch (ErrnoException failure) {
+            fileSystem.rename(temporary, destination);
+        } catch (IOException failure) {
             throw new IOException("Cannot publish book cache file", failure);
         }
     }

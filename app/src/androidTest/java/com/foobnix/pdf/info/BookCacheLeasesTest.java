@@ -59,6 +59,46 @@ public class BookCacheLeasesTest {
         }
     }
 
+    @Test public void detachUnitLeavesAllMembersWhenOneIsLeased() throws Exception {
+        File dir = directory(), first = new File(dir, "first"), second = new File(dir, "second");
+        Files.write(first.toPath(), new byte[]{1}); Files.write(second.toPath(), new byte[]{2});
+        try (AutoCloseable lease = BookCacheLeases.acquire(second)) {
+            assertNull(BookCacheLeases.detachAllOrNone(java.util.Arrays.asList(first, second)));
+            assertTrue(first.isFile()); assertTrue(second.isFile());
+        } finally { BookCacheLeases.evictTree(dir); }
+    }
+
+    @Test public void missingFileCannotBeAcquired() throws Exception {
+        File dir = directory();
+        try { assertNull(BookCacheLeases.acquireIfFile(new File(dir, "missing"))); }
+        finally { BookCacheLeases.evictTree(dir); }
+    }
+
+    @Test public void racingPublishersLeaseTheSameWinnerAndDiscardTheLoser() throws Exception {
+        File dir = directory(), destination = new File(dir, "book.epub");
+        File first = new File(dir, "first.part"), second = new File(dir, "second.part");
+        Files.write(first.toPath(), new byte[]{1}); Files.write(second.toPath(), new byte[]{2});
+        CountDownLatch start = new CountDownLatch(1);
+        java.util.concurrent.ExecutorService writers = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            java.util.concurrent.Future<AutoCloseable> a = writers.submit(() -> {
+                start.await(); return BookCacheLeases.publishOrReuse(first, destination);
+            });
+            java.util.concurrent.Future<AutoCloseable> b = writers.submit(() -> {
+                start.await(); return BookCacheLeases.publishOrReuse(second, destination);
+            });
+            start.countDown();
+            AutoCloseable one = a.get(5, TimeUnit.SECONDS), two = b.get(5, TimeUnit.SECONDS);
+            try {
+                assertTrue(destination.isFile()); assertFalse(first.exists()); assertFalse(second.exists());
+                assertEquals(1, dir.listFiles().length);
+                assertFalse(BookCacheLeases.evictTree(destination));
+                one.close();
+                assertFalse(BookCacheLeases.evictTree(destination));
+            } finally { one.close(); two.close(); }
+        } finally { writers.shutdownNow(); BookCacheLeases.evictTree(dir); }
+    }
+
     private File directory() throws Exception {
         return Files.createTempDirectory(InstrumentationRegistry.getInstrumentation()
                 .getTargetContext().getCacheDir().toPath(), "book-cache-leases-").toFile();

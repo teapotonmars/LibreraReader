@@ -24,14 +24,17 @@ public class JsonHelperTest {
     public TemporaryFolder folder = new TemporaryFolder();
 
     private MockedStatic<LOG> log;
+    private AutoCloseable fileSystem;
 
     @Before
     public void setUp() {
+        fileSystem = com.foobnix.pdf.info.CacheFileSystemTestSupport.install();
         log = Mockito.mockStatic(LOG.class, Mockito.withSettings().stubOnly());
     }
 
     @After
-    public void tearDown() {
+    public void tearDown() throws Exception {
+        fileSystem.close();
         log.close();
     }
 
