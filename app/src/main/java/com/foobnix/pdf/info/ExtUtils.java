@@ -474,19 +474,8 @@ public class ExtUtils {
         if (legacyFiles != null) for (File legacyFile : legacyFiles) BookCacheLeases.evict(legacyFile);
     }
 
-    private static void pruneSafOpenCache(File cacheDir, File protectedFile) {
-        File[] files = cacheDir.listFiles(file -> file.isFile() && !file.getName().endsWith(".part"));
-        if (files == null) return;
-        protectedFile.setLastModified(System.currentTimeMillis());
-        long total = 0;
-        for (File file : files) total += file.length();
-        Arrays.sort(files, (left, right) -> Long.compare(left.lastModified(), right.lastModified()));
-        for (File file : files) {
-            if (total <= SAF_OPEN_CACHE_MAX_BYTES) break;
-            if (file.equals(protectedFile)) continue;
-            long length = file.length();
-            if (BookCacheLeases.evict(file)) total -= length;
-        }
+    static void pruneSafOpenCache(File cacheDir, File protectedFile) {
+        CacheBudget.prune(cacheDir, SAF_OPEN_CACHE_MAX_BYTES, File::getName);
     }
 
     private static String safCacheKey(String uri) throws Exception {

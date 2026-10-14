@@ -88,6 +88,21 @@ public class SafStagingCacheTest {
         File[] children = file.listFiles(); if (children != null) for (File child : children) delete(child);
         file.delete();
     }
+    @Test public void pruningKeepsReservedCopiesAndRefreshesTheirAge() throws Exception {
+        File cache = new File(directory, "saf-open"); assertTrue(cache.mkdir());
+        File reserved = new File(cache, "reserved.pdf"), inactive = new File(cache, "inactive.pdf");
+        Files.write(reserved.toPath(), new byte[]{1}); Files.write(inactive.toPath(), new byte[]{2});
+        assertTrue(reserved.setLastModified(1000));
+        BookCacheLeases.reserve(reserved);
+        try {
+            CacheBudget.prune(cache, 0, File::getName);
+            assertTrue(reserved.isFile()); assertFalse(inactive.exists());
+            assertTrue(reserved.lastModified() > 1000);
+        } finally { BookCacheLeases.cancelReservation(reserved); }
+        CacheBudget.prune(cache, 0, File::getName);
+        assertFalse(reserved.exists());
+    }
+
     @Test public void unchangedRevisionReusesCompleteDownloadedBook() throws Exception {
         File first = ExtUtils.stageSafFile(context, uri, "fallback.pdf");
         File second = ExtUtils.stageSafFile(context, uri, "fallback.pdf");
