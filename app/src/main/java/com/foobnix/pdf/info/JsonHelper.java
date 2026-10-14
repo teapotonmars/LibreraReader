@@ -40,10 +40,9 @@ public class JsonHelper {
         File temporary = null;
         try {
             AutoCloseable lease;
-            synchronized (BookCacheLeases.class) {
-                temporary = BookCacheLeases.temporary(jsonFile.getParentFile(), "notes-");
-                lease = BookCacheLeases.acquire(temporary);
-            }
+            BookCacheLeases.LeasedFile owned = BookCacheLeases.temporaryWithLease(jsonFile.getParentFile(), "notes-");
+                    temporary = owned.file;
+                    lease = owned;
             try (AutoCloseable writing = lease) {
                 try (java.io.FileOutputStream output = new java.io.FileOutputStream(temporary);
                      java.io.OutputStreamWriter writer = new java.io.OutputStreamWriter(
@@ -52,20 +51,14 @@ public class JsonHelper {
                     writer.flush();
                     output.getFD().sync();
                 }
-                synchronized (BookCacheLeases.class) {
-                    if (cacheEntry && (repairInvalid ? isValidMapFile(jsonFile) : jsonFile.isFile()))
-                        return false;
-                    if ((jsonFile.exists() && !jsonFile.isFile()) ||
-                            BookCacheLeases.isProtected(jsonFile) || !temporary.renameTo(jsonFile))
-                        throw new java.io.IOException("Cannot publish notes cache: " + jsonFile);
-                }
+                return BookCacheLeases.publishUnless(temporary, jsonFile,
+                        file -> cacheEntry && (repairInvalid ? isValidMapFile(file) : file.isFile()));
             }
-            return true;
         } catch (Exception e) {
             LOG.e(e);
             return false;
         } finally {
-            if (temporary != null) temporary.delete();
+            if (temporary != null) BookCacheLeases.evictTree(temporary);
         }
     }
 

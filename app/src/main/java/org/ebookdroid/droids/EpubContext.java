@@ -84,9 +84,7 @@ EpubContext extends PdfContext {
         AutoCloseable outputLease = null;
         String bookPath = fileName;
         if (process) {
-            synchronized (BookCacheLeases.class) {
-                if (cacheFile.isFile()) outputLease = BookCacheLeases.acquire(cacheFile);
-            }
+            outputLease = BookCacheLeases.acquireIfFile(cacheFile);
             if (outputLease == null) {
                 if (EpubOpenPlan.needsNotesBeforeOpen(showNotes, process, false)) {
                     notes = loadNotes(fileName);
@@ -95,23 +93,19 @@ EpubContext extends PdfContext {
                 File temporary = null;
                 try {
                     AutoCloseable writing;
-                    synchronized (BookCacheLeases.class) {
-                        temporary = BookCacheLeases.temporary(cacheFile.getParentFile(), "epub-process-");
-                        writing = BookCacheLeases.acquire(temporary);
-                    }
+                    BookCacheLeases.LeasedFile owned = BookCacheLeases.temporaryWithLease(cacheFile.getParentFile(), "epub-process-");
+                    temporary = owned.file;
+                    writing = owned;
                     try (AutoCloseable protectedOutput = writing) {
                         EpubExtractor.proccessHypensApache(fileName, temporary.getPath(), notes);
                         if (TempHolder.get().loadingCancelled.get())
                             throw new java.io.IOException("EPUB processing cancelled");
-                        synchronized (BookCacheLeases.class) {
-                            if (!cacheFile.isFile()) BookCacheLeases.publish(temporary, cacheFile);
-                            outputLease = BookCacheLeases.acquire(cacheFile);
-                        }
+                        outputLease = BookCacheLeases.publishOrReuse(temporary, cacheFile);
                     }
                 } catch (Exception failure) {
                     LOG.e(failure);
                 } finally {
-                    if (temporary != null) temporary.delete();
+                    if (temporary != null) BookCacheLeases.evictTree(temporary);
                 }
             }
             if (outputLease != null) bookPath = cacheFile.getPath();

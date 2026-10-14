@@ -213,11 +213,47 @@ public final class BookCacheLeases {
             originals.add(file);
             detached.add(tombstone);
         }
+        for (File original : originals) retireImmutableRevisionNamedSources(original);
         return detached;
     }
 
     public static void deleteDetachedTrees(Collection<File> files) {
         for (File file : files) deleteDetachedTree(file);
+    }
+
+    /** Publish metadata unless a complete entry already satisfies the caller's policy. */
+    public static synchronized boolean publishUnless(File temporary, File destination,
+            java.util.function.Predicate<File> reusable) throws IOException {
+        if (reusable.test(destination)) return false;
+        if (destination.exists() && !destination.isFile())
+            throw new IOException("Cannot replace a cache directory: " + destination);
+        publish(temporary, destination);
+        return true;
+    }
+
+    private static final Set<String> invalidConversions = new HashSet<>();
+    private static File failureMarker(File unit) {
+        return new File(unit.getParentFile(), unit.getName() + ".invalid");
+    }
+
+    public static synchronized void invalidateConversion(File unit) {
+        invalidConversions.add(key(unit));
+        try { failureMarker(unit).createNewFile(); }
+        catch (IOException unavailable) { com.foobnix.android.utils.LOG.e(unavailable); }
+    }
+
+    public static void prepareConversion(File unit, java.util.function.Function<File, String> unitKey) {
+        List<File> detached;
+        synchronized (BookCacheLeases.class) {
+            File marker = failureMarker(unit);
+            if (!invalidConversions.contains(key(unit)) && !marker.exists()) return;
+            File[] members = unit.getParentFile().listFiles(file -> unitKey.apply(file).equals(unit.getName()));
+            if (members == null) throw new IllegalStateException("Cannot inspect invalid conversion");
+            detached = detachAllOrNone(java.util.Arrays.asList(members));
+            if (detached == null) throw new IllegalStateException("Cannot discard active or unavailable conversion");
+            invalidConversions.remove(key(unit));
+        }
+        deleteDetachedTrees(detached);
     }
 
     private static String key(File file) { return file.getAbsolutePath(); }

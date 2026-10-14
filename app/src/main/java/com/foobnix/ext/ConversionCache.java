@@ -1,24 +1,17 @@
 package com.foobnix.ext;
 
-import com.foobnix.android.utils.LOG;
 import com.foobnix.pdf.info.BookCacheLeases;
 import com.foobnix.pdf.info.BuildConfig;
 import com.foobnix.sys.TempHolder;
 import org.ebookdroid.droids.mupdf.codec.exceptions.MuPdfPasswordException;
 import java.io.File;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CancellationException;
 
 /** Release-scoped conversion identities and recovery of unusable published units. */
 public final class ConversionCache {
-    private static final Set<String> INVALID = ConcurrentHashMap.newKeySet();
     private ConversionCache() { }
 
     public static String key(String input) { return key(input, BuildConfig.VERSION_CODE); }
@@ -44,7 +37,6 @@ public final class ConversionCache {
         if (name.equals(".") || name.equals("..") || name.isEmpty()) return null;
         return new File(root, CacheZipUtils.cacheUnitKey(new File(root, name)));
     }
-    private static File marker(File unit) { return new File(unit.getParentFile(), unit.getName() + ".invalid"); }
 
     static boolean isCancellationOrPassword(Throwable failure) {
         for (Throwable current = failure; current != null; current = current.getCause()) {
@@ -61,35 +53,13 @@ public final class ConversionCache {
                 || isCancellationOrPassword(failure)) return;
         File unit = unit(path);
         if (unit == null) return;
-        synchronized (BookCacheLeases.class) {
-            INVALID.add(unit.getPath());
-            try { marker(unit).createNewFile(); }
-            catch (IOException unavailable) { LOG.e(unavailable); }
-        }
+        BookCacheLeases.invalidateConversion(unit);
     }
 
-    /** Called before taking output leases. Active readers finish; new opens cannot reuse a bad unit. */
+    /** Active readers finish; new opens cannot reuse a bad unit. */
     public static void prepare(File path) {
         File unit = unit(path);
-        if (unit == null) return;
-        List<File> detached = new ArrayList<>();
-        synchronized (BookCacheLeases.class) {
-            File marker = marker(unit);
-            if (!INVALID.contains(unit.getPath()) && !marker.exists()) return;
-            File[] members = unit.getParentFile().listFiles(file ->
-                    CacheZipUtils.cacheUnitKey(file).equals(unit.getName()) && !file.equals(marker));
-            if (members == null) throw new IllegalStateException("Cannot inspect invalid conversion");
-            for (File member : members) if (BookCacheLeases.isProtected(member))
-                throw new IllegalStateException("An active reader still owns this invalid conversion");
-            for (File member : members) {
-                File tombstone = BookCacheLeases.detachTree(member);
-                if (tombstone == null) throw new IllegalStateException("Cannot discard invalid conversion");
-                detached.add(tombstone);
-            }
-            if (marker.exists() && !marker.delete()) throw new IllegalStateException("Cannot retire conversion failure marker");
-            INVALID.remove(unit.getPath());
-        }
-        for (File tombstone : detached) BookCacheLeases.evictTree(tombstone);
+        if (unit != null) BookCacheLeases.prepareConversion(unit, CacheZipUtils::cacheUnitKey);
     }
 
     public static BookCacheLeases.PublishedFile buildFile(File target, BookCacheLeases.FileWriter writer) throws Exception {

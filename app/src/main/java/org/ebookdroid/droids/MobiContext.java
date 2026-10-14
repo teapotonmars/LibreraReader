@@ -46,9 +46,7 @@ public class MobiContext extends PdfContext {
         if (cacheFile == null) cacheFile = getCacheFileName(fileName);
         ConversionCache.prepare(cacheFile);
         AutoCloseable outputLease = null;
-        synchronized (BookCacheLeases.class) {
-            if (cacheFile.isFile()) outputLease = BookCacheLeases.acquire(cacheFile);
-        }
+        outputLease = BookCacheLeases.acquireIfFile(cacheFile);
         if (outputLease == null) {
             String stem = "mobi-" + UUID.randomUUID();
             File converted = new File(CacheZipUtils.CACHE_BOOK_DIR, stem + ".epub");
@@ -58,19 +56,15 @@ public class MobiContext extends PdfContext {
                 MobiExtract.extract(fileName, CacheZipUtils.CACHE_BOOK_DIR.getPath(), stem);
                 File publishable = converted;
                 if (EpubProcessingSettings.isAutoHypens()) {
-                    synchronized (BookCacheLeases.class) {
-                        processed = BookCacheLeases.temporary(CacheZipUtils.CACHE_BOOK_DIR, "mobi-process-");
-                        processingLease = BookCacheLeases.acquire(processed);
-                    }
+                    BookCacheLeases.LeasedFile owned = BookCacheLeases.temporaryWithLease(CacheZipUtils.CACHE_BOOK_DIR, "mobi-process-");
+                    processed = owned.file;
+                    processingLease = owned;
                     EpubExtractor.proccessHypensApache(converted.getPath(), processed.getPath(), null);
                     if (TempHolder.get().loadingCancelled.get())
                         throw new IOException("MOBI processing cancelled");
                     publishable = processed;
                 }
-                synchronized (BookCacheLeases.class) {
-                    if (!cacheFile.isFile()) BookCacheLeases.publish(publishable, cacheFile);
-                    outputLease = BookCacheLeases.acquire(cacheFile);
-                }
+                outputLease = BookCacheLeases.publishOrReuse(publishable, cacheFile);
             } catch (Exception failure) {
                 throw new IllegalStateException("Cannot convert MOBI book", failure);
             } finally {

@@ -253,20 +253,9 @@ public class CacheZipUtils {
             unit.sort((left, right) -> Boolean.compare(isCompanion(left), isCompanion(right)));
             List<File> hidden = new ArrayList<>();
             long hiddenBytes = 0;
-            synchronized (BookCacheLeases.class) {
-                boolean active = false;
-                for (File member : unit) active |= BookCacheLeases.isProtected(member);
-                if (active) continue;
-                for (File member : unit) {
-                    if (!member.exists()) continue;
-                    File tombstone = new File(root, member.getName() + "-"
-                            + UUID.randomUUID() + ".part");
-                    if (!member.renameTo(tombstone)) break;
-                    BookCacheLeases.retireImmutableRevisionNamedSources(member);
-                    hidden.add(tombstone);
-                    hiddenBytes += sizes.getOrDefault(member, 0L);
-                }
-            }
+            hidden = BookCacheLeases.detachAllOrNone(unit);
+            if (hidden == null) continue;
+            for (File member : unit) hiddenBytes += sizes.getOrDefault(member, 0L);
             // Renamed entries cannot be acquired by their published paths. Recursion
             // runs outside the lease monitor; failed deletion remains accounted for.
             total -= hiddenBytes;
@@ -287,16 +276,8 @@ public class CacheZipUtils {
 
     private static boolean evictCacheEntry(File entry) {
         File tombstone;
-        synchronized (BookCacheLeases.class) {
-            if (BookCacheLeases.isProtected(entry)) return false;
-            if (!entry.isDirectory()) return BookCacheLeases.evict(entry);
-            // Hide the published directory before recursive deletion. An I/O
-            // error must not leave its main file visible without siblings.
-            tombstone = new File(entry.getParentFile(), entry.getName() + "-"
-                    + UUID.randomUUID() + ".part");
-            if (!entry.renameTo(tombstone)) return false;
-            BookCacheLeases.retireImmutableRevisionNamedSources(entry);
-        }
+        tombstone = BookCacheLeases.detachTree(entry);
+        if (tombstone == null) return false;
         return deleteHiddenTree(tombstone);
     }
 
