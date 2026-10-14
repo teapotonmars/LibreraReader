@@ -168,7 +168,7 @@ public class CacheZipUtils {
             }
             for (File file : files) {
                 if (file != null) {
-                    boolean result = evictCacheEntry(file);
+                    boolean result = BookCacheLeases.evictTree(file);
                     LOG.d("removeFile", file,result);
                 }
             }
@@ -218,72 +218,15 @@ public class CacheZipUtils {
         }
     }
 
+    private static final long BOOK_CACHE_SOFT_LIMIT_BYTES = 512L * 1024 * 1024;
+
     /** Retain completed conversions between opens, evicting old inactive entries. */
     public static void pruneBookCache() {
-        pruneBookCache(CACHE_BOOK_DIR, 512L * 1024 * 1024);
+        pruneBookCache(CACHE_BOOK_DIR, BOOK_CACHE_SOFT_LIMIT_BYTES);
     }
 
     static void pruneBookCache(File root, long limit) {
-        if (root == null) return;
-        File[] entries = root.listFiles();
-        if (entries == null) return;
-        Map<String, List<File>> groups = new HashMap<>();
-        for (File entry : entries)
-            groups.computeIfAbsent(cacheUnitKey(entry), ignored -> new ArrayList<>()).add(entry);
-        List<List<File>> units = new ArrayList<>(groups.values());
-        Map<File, Long> sizes = new HashMap<>();
-        long total = 0;
-        long now = System.currentTimeMillis();
-        for (List<File> unit : units) {
-            boolean active = false;
-            for (File member : unit) active |= BookCacheLeases.isProtected(member);
-            for (File member : unit) {
-                if (active) member.setLastModified(now);
-                long bytes = cacheBytes(member);
-                total += bytes;
-                sizes.put(member, bytes);
-            }
-        }
-        units.sort((left, right) -> Long.compare(unitModified(left), unitModified(right)));
-        for (List<File> unit : units) {
-            boolean incomplete = unit.stream().anyMatch(file -> file.getName().endsWith(".part"));
-            if (total <= limit && !incomplete) continue;
-            // Remove the main file before its notes and extracted companions, so
-            // a failed deletion cannot leave a reusable output missing a sidecar.
-            unit.sort((left, right) -> Boolean.compare(isCompanion(left), isCompanion(right)));
-            List<File> hidden = new ArrayList<>();
-            long hiddenBytes = 0;
-            hidden = BookCacheLeases.detachAllOrNone(unit);
-            if (hidden == null) continue;
-            for (File member : unit) hiddenBytes += sizes.getOrDefault(member, 0L);
-            // Renamed entries cannot be acquired by their published paths. Recursion
-            // runs outside the lease monitor; failed deletion remains accounted for.
-            total -= hiddenBytes;
-            for (File tombstone : hidden) {
-                if (!deleteHiddenTree(tombstone)) total += cacheBytes(tombstone);
-            }
-        }
-    }
-
-    private static boolean deleteHiddenTree(File entry) {
-        if (entry.isDirectory()) {
-            File[] children = entry.listFiles();
-            if (children == null) return false;
-            for (File child : children) if (!deleteHiddenTree(child)) return false;
-        }
-        return entry.delete();
-    }
-
-    private static boolean evictCacheEntry(File entry) {
-        File tombstone;
-        tombstone = BookCacheLeases.detachTree(entry);
-        if (tombstone == null) return false;
-        return deleteHiddenTree(tombstone);
-    }
-
-    private static boolean isCompanion(File file) {
-        String name = file.getName();
-        return name.endsWith(".json") || name.endsWith("-source") || name.endsWith(".invalid");
+        com.foobnix.pdf.info.CacheBudget.prune(root, limit, CacheZipUtils::cacheUnitKey);
     }
 
     static String cacheUnitKey(File file) {
@@ -293,21 +236,6 @@ public class CacheZipUtils {
         if (name.endsWith("-source")) return name.substring(0, name.length() - 7);
         if (name.endsWith("-fixed.epub")) return name.substring(0, name.length() - 11);
         return name;
-    }
-
-    private static long unitModified(List<File> unit) {
-        long modified = 0;
-        for (File member : unit) modified = Math.max(modified, member.lastModified());
-        return modified;
-    }
-
-    private static long cacheBytes(File entry) {
-        if (!entry.isDirectory()) return entry.length();
-        File[] children = entry.listFiles();
-        if (children == null) return 0;
-        long total = 0;
-        for (File child : children) total += cacheBytes(child);
-        return total;
     }
 
     public static Pair<Boolean, String> isSingleAndSupportEntry(String file) {

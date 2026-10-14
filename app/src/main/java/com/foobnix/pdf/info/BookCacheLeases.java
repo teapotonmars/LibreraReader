@@ -187,15 +187,19 @@ public final class BookCacheLeases {
         return acquire(destination);
     }
 
+    public static synchronized boolean refreshIfProtected(Collection<File> files) {
+        boolean active = false;
+        for (File file : files) active |= isProtected(file);
+        if (active) {
+            long now = System.currentTimeMillis();
+            for (File file : files) file.setLastModified(now);
+        }
+        return active;
+    }
+
     /** Hide a whole cache unit or leave every member in place. */
     public static synchronized List<File> detachAllOrNone(Collection<File> files) {
-        for (File file : files) {
-            if (isProtected(file)) {
-                long now = System.currentTimeMillis();
-                for (File member : files) member.setLastModified(now);
-                return null;
-            }
-        }
+        for (File file : files) if (isProtected(file)) return null;
         List<File> originals = new ArrayList<>(), detached = new ArrayList<>();
         for (File file : files) {
             // lstat also sees dangling links, which exists() would miss.
@@ -343,12 +347,7 @@ public final class BookCacheLeases {
         return protectedBy(leases, file);
     }
 
-    public static synchronized boolean evict(File file) {
-        if (isProtected(file)) return false;
-        boolean removed = file.delete();
-        if (removed) immutableRevisionNamedSources.remove(key(file));
-        return removed;
-    }
+    public static boolean evict(File file) { return evictTree(file); }
 
     /** Do not partly remove a directory while a reader uses anything inside it. */
     public static boolean evictTree(File file) {
@@ -358,14 +357,8 @@ public final class BookCacheLeases {
 
     /** Hide an inactive unit under the lease monitor; callers delete it outside the monitor. */
     public static synchronized File detachTree(File file) {
-        if (isProtected(file) || !file.exists()) return null;
-        String original = key(file);
-        File tombstone = new File(file.getParentFile(), ".evicted-" + UUID.randomUUID());
-        try { fileSystem.rename(file, tombstone); }
-        catch (IOException unavailable) { return null; }
-        immutableRevisionNamedSources.removeIf(path -> path.equals(original)
-                || path.startsWith(original + File.separator));
-        return tombstone;
+        List<File> hidden = detachAllOrNone(java.util.Collections.singletonList(file));
+        return hidden == null || hidden.isEmpty() ? null : hidden.get(0);
     }
 
     /** Detach synchronously; recursive deletion never runs in a caller's lease monitor. */

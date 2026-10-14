@@ -111,6 +111,20 @@ public class BookCacheRetentionTest {
         }
     }
 
+    @Test public void evictedUnitDoesNotFollowASymlinkToAnOutsideFile() throws Exception {
+        File root = Files.createTempDirectory(InstrumentationRegistry.getInstrumentation()
+                .getTargetContext().getCacheDir().toPath(), "symlink-budget-").toFile();
+        File outside = File.createTempFile("outside-", ".epub", root.getParentFile());
+        File unit = new File(root, "book-source"); assertTrue(unit.mkdir());
+        Files.write(outside.toPath(), new byte[]{1, 2, 3});
+        android.system.Os.symlink(outside.getPath(), new File(unit, "link").getPath());
+        try {
+            CacheZipUtils.pruneBookCache(root, 0);
+            assertFalse(unit.exists());
+            assertArrayEquals(new byte[]{1, 2, 3}, Files.readAllBytes(outside.toPath()));
+        } finally { BookCacheLeases.evictTree(root); outside.delete(); }
+    }
+
     @Test public void explicitCacheClearWaitsForTheLastReaderLease() throws Exception {
         android.content.Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
         CacheZipUtils.init(target);

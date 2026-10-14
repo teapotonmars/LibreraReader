@@ -35,7 +35,7 @@ final class FooterNotesCache {
         }
         if (TempHolder.get().loadingCancelled.get()) {
             // cancelled while it was being written
-            jsonFile.delete();
+            com.foobnix.pdf.info.BookCacheLeases.evictTree(jsonFile);
             return false;
         }
         LOG.d("save notes to file", jsonFile);
