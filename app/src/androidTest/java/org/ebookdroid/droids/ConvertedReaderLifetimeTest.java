@@ -164,7 +164,12 @@ public class ConvertedReaderLifetimeTest {
             assertNotNull(firstDocument);
             File firstOutput = new File(first.cacheDirectory, "truetxt.html");
             assertTrue(firstOutput.isFile());
-            Files.write(source.toPath(), "Second edition with more text.".getBytes(StandardCharsets.UTF_8));
+            // Some emulator filesystems expose only whole-second timestamps.
+            byte[] changed = new byte[(int) source.length() + 1000];
+            java.util.Arrays.fill(changed, (byte) ' ');
+            byte[] text = "Second edition with more text.".getBytes(StandardCharsets.UTF_8);
+            System.arraycopy(text, 0, changed, 0, text.length);
+            Files.write(source.toPath(), changed);
             assertTrue(source.setLastModified(oldSum - source.length()));
             assertEquals("The old length+mtime key would collide", oldSum,
                     source.length() + source.lastModified());
